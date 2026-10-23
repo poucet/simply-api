@@ -3,6 +3,24 @@
 What got added, per landing — dated with a clock and the jj change id
 (one entry per landing, newest first).
 
+## 0.2.0 — 2026-10-24
+
+#### Headless egui rendering, shared (`OFFSCREEN`) · 2026-10-24 08:15 · ltpnsqvl
+
+- New crate **`simply-offscreen`**: `render_png(frame, w_pt, h_pt, ppp)`,
+  `render_png_posed(…, pose)` and `render_png_with(setup, frame, …, pose)`
+  → `Result<OffscreenPng {bytes, width, height}, String>`; `SETTLE_FRAMES`,
+  `UNAVAILABLE`, `Harness` re-exported. `setup` themes the context once
+  before the first frame. A missing wgpu backend is an `Err` starting with
+  `UNAVAILABLE`, not a panic.
+- It is the generic part of flux-editor's `shell/offscreen.rs` at flux
+  `bae34fcf` (no editor render, no flux theme). flux is unchanged.
+- Adds egui 0.36.1, egui_kittest 0.36.1 (`wgpu`), egui-wgpu 0.36.1 and
+  image 0.25.10 to the lockfile, at flux's versions. Render tests skip
+  on a machine with no wgpu backend.
+- Depend on it with
+  `simply-offscreen = { git = "https://github.com/poucet/simply-api", tag = "v0.2.0" }`.
+
 ## 0.1.1 — 2026-10-23
 
 #### MIT only (`LICENSE-MIT-ONLY`) · 2026-10-23 · kxrnwllw

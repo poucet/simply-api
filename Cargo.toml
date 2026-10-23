@@ -6,11 +6,12 @@ members = [
     "crates/simply-api",
     "crates/simply-api-macros",
     "crates/simply-history",
+    "crates/simply-offscreen",
     "crates/simply-op-macros",
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/poucet/simply-api"
@@ -22,6 +23,7 @@ authors = ["Christophe Poucet"]
 simply-api = { path = "crates/simply-api" }
 simply-api-macros = { path = "crates/simply-api-macros" }
 simply-history = { path = "crates/simply-history" }
+simply-offscreen = { path = "crates/simply-offscreen" }
 simply-op-macros = { path = "crates/simply-op-macros" }
 
 # Same requirements as flux's workspace at bae34fcf.

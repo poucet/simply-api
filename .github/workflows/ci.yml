@@ -1,5 +1,7 @@
 # Test and lint the workspace. Modelled on flux's ci.yml, cut down to what a
-# pure-library workspace needs: no system libraries, no xtask, no GPU tests.
+# pure-library workspace needs: no system libraries, no xtask. simply-offscreen's
+# render tests need a wgpu backend; on a runner without one they skip
+# (their output says so) and pass, while compile and clippy still run.
 #
 # The repo is public, so runner minutes are free on every OS. Linux and macOS
 # run on every push and pull request (the consumers, flux and tussen, are

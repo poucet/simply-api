@@ -1,0 +1,25 @@
+[package]
+name = "simply-offscreen"
+description = "Headless egui rendering: run a frame in an egui_kittest wgpu harness until it settles and return it as PNG bytes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+# Same versions as flux-editor's `offscreen` feature at flux bae34fcf.
+# egui 0.36 needs rustc >= 1.95 (rust-toolchain.toml).
+[dependencies]
+egui = "0.36.1"
+# Only `wgpu`: `Harness::render` needs nothing from flux's extra `snapshot`
+# feature (diffing against stored images).
+egui_kittest = { version = "0.36.1", features = ["wgpu"] }
+# Named for `RendererOptions` (hardware texture filtering); it is already in
+# the tree through egui_kittest, so this adds a name and no build.
+egui-wgpu = "0.36.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# Decode the PNG in tests: the same crate and features as above.
+image = { version = "0.25", default-features = false, features = ["png"] }
