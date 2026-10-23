@@ -3,6 +3,14 @@
 What got added, per landing — dated with a clock and the jj change id
 (format: `~/projects/simply/dev/AGENTS.md` §2).
 
+## 0.1.1 — 2026-10-23
+
+#### MIT only (`LICENSE-MIT-ONLY`) · 2026-10-23 · kxrnwllw
+
+- Licence is **MIT**, matching tussen; no longer `MIT OR Apache-2.0`.
+  `LICENSE-MIT` is now `LICENSE`, `LICENSE-APACHE` is gone, every crate
+  declares `license = "MIT"`. `v0.1.0` stays as published; depend on `v0.1.1`.
+
 ## 0.1.0 — 2026-10-23
 
 #### Published as `poucet/simply-api` (`API-PUBLISH`) · 2026-10-23 13:58 · ywtzoswx
