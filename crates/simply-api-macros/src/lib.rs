@@ -29,7 +29,7 @@
 //! Generated alongside the (unchanged) trait: per-method params structs,
 //! a `ServiceMeta` registry, an rmcp `ToolRouter` factory, a `Caller`
 //! dispatcher, a `Remote{Trait}` client, and a `Dyn{Trait}` alias — see
-//! [`codegen`] for the full list. Place `#[api_service]` **above**
+//! the `codegen` module for the full list. Place `#[api_service]` **above**
 //! `#[async_trait]`.
 
 #![forbid(unsafe_code)]

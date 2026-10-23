@@ -1,7 +1,7 @@
 # Changelog
 
 What got added, per landing — dated with a clock and the jj change id
-(format: `~/projects/simply/dev/AGENTS.md` §2).
+(one entry per landing, newest first).
 
 ## 0.1.1 — 2026-10-23
 
@@ -10,6 +10,8 @@ What got added, per landing — dated with a clock and the jj change id
 - Licence is **MIT**, matching tussen; no longer `MIT OR Apache-2.0`.
   `LICENSE-MIT` is now `LICENSE`, `LICENSE-APACHE` is gone, every crate
   declares `license = "MIT"`. `v0.1.0` stays as published; depend on `v0.1.1`.
+- Public-repo cleanup: no local machine paths in the docs, the internal
+  sense comparison note removed, `cargo doc` warning-free (I-001).
 
 ## 0.1.0 — 2026-10-23
 
@@ -39,5 +41,4 @@ What got added, per landing — dated with a clock and the jj change id
   dependency versions. The versions are reset to 0.1.0. Licence:
   `MIT OR Apache-2.0`.
 - Nothing changes yet for flux, tussen or sense: none of them depends on this
-  repo yet. sense's own copy is an older flux one, with nothing flux lacks
-  ([research](../research/sense-copy.md)).
+  repo yet.

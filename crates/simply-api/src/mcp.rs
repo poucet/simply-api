@@ -214,7 +214,7 @@ static SUPPORTED_PROTOCOL_VERSIONS: LazyLock<Vec<ProtocolVersion>> = LazyLock::n
 });
 
 /// Every protocol revision an [`McpApiServer`] will negotiate, oldest first
-/// — see [`SUPPORTED_PROTOCOL_VERSIONS`]. A client asking for anything
+/// — see `SUPPORTED_PROTOCOL_VERSIONS`. A client asking for anything
 /// outside this set is answered the newest one in it, never its own.
 pub fn supported_protocol_versions() -> &'static [ProtocolVersion] {
     &SUPPORTED_PROTOCOL_VERSIONS
@@ -287,7 +287,7 @@ impl<A: ?Sized + Send + Sync + 'static> ServerHandler for McpApiServer<A> {
     }
 
     /// Narrow rmcp's default (every version it can name) to the ones whose
-    /// replies we actually write — see [`SUPPORTED_PROTOCOL_VERSIONS`]. This
+    /// replies we actually write — see `SUPPORTED_PROTOCOL_VERSIONS`. This
     /// is what bounds `initialize` negotiation, on every transport: the
     /// streamable-HTTP tower negotiates through this list too.
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {

@@ -4,13 +4,9 @@
 web and the landing rules, shared with every project run this way. This file
 adds only what is specific to this repo.
 
-`SYSTEM.md` and `.claude/agents` are gitignored symlinks into
-`~/projects/simply/dev/`. They are missing from a fresh clone or a new
-workspace. Recreate them with:
-
-    mkdir -p .claude
-    ln -sfn ~/projects/simply/dev/agents .claude/agents
-    ln -sfn ~/projects/simply/dev/AGENTS.md SYSTEM.md
+`SYSTEM.md` and `.claude/agents` are gitignored symlinks into the maintainer's
+shared working-system docs, which are not part of this repo. They are absent
+from a fresh clone; contributors can ignore them.
 
 ## What this repo is
 
@@ -19,7 +15,7 @@ users are flux, tussen v2 and sense. The repo is named after its main crate.
 A crate belongs here when two projects would otherwise each keep a copy and
 drift apart. **Nothing here may depend on a project crate** (`flux-*`,
 `tussen-*`, …): a shared crate that depends on a project drags the project
-into every consumer. Musical vocabulary goes to `~/projects/simply/music-rs`.
+into every consumer. Musical vocabulary goes to [music-rs](https://github.com/poucet/music-rs).
 
 Consumers pin a **git tag** on `https://github.com/poucet/simply-api`, which is
 public because tussen is open source. **Push a tag before any consumer

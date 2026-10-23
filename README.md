@@ -87,14 +87,6 @@ byte for byte the same, except for:
 flux, tussen and sense are not yet migrated onto this repo. Each still carries
 its own copy, or none.
 
-## The divergent copy in sense
-
-The sense repo (main `9644bfff`) carries its own copy of all four
-crates, snapshotted from flux on 2026-09-03/04. The comparison is in
-[`docs/research/sense-copy.md`](docs/research/sense-copy.md). In short, **sense
-has nothing flux lacks.** Its copy is an older flux. Every difference is
-either something flux added after the snapshot or a formatting difference.
-
 ## Development
 
     cargo test --workspace
