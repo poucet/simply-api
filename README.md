@@ -6,7 +6,8 @@ records operations into. Nothing in here knows about audio, music, or any one
 app.
 
 "simply-kit" is a working name. It is spelled in this README, `AGENTS.md`, and
-the top comment of `Cargo.toml`; a rename touches those and the directory.
+`Cargo.toml` (`repository`); a rename touches those, the directory and the
+GitHub repo.
 
 ## Crates
 
@@ -26,27 +27,66 @@ External dependencies (versions as resolved in flux's `Cargo.lock` at
 `tokio 1.53.1` (`time`), and `syn 2` / `quote 1` / `proc-macro2 1` for the
 two proc-macro crates. Dev only: `futures 0.3`, tokio's runtime features.
 
-Licence: `MIT OR Apache-2.0`, the same as flux, and compatible with tussen's MIT.
-
 ## Using it
 
-By git tag, from the workspace root of the consumer:
+Depend on a tag, declared once at the consumer's workspace root:
 
-    simply-api = { git = "<url>", tag = "v0.1.0" }
+```toml
+[workspace.dependencies]
+simply-api = { git = "https://github.com/poucet/simply-kit", tag = "v0.1.0" }
+# or, for an undo tree with no API:
+simply-history = { git = "https://github.com/poucet/simply-kit", tag = "v0.1.0" }
+simply-op-macros = { git = "https://github.com/poucet/simply-kit", tag = "v0.1.0" }
+```
 
-There is no remote yet. Until there is, a local consumer can point at
-this checkout with `git = "file:///Users/simplychris/projects/simply/simply-kit"`.
-The repo is colocated, so cargo can read the tag.
+`Cargo.lock` pins the commit. A newer tag means bumping `tag` and running
+`cargo update -p simply-api`. The crates are not on crates.io.
+
+A minimal service:
+
+```rust,ignore
+use async_trait::async_trait;
+use simply_api::{api_service, ApiResult};
+
+#[api_service]
+#[async_trait]
+pub trait CounterApi: Send + Sync {
+    /// Add `by` to the counter and return the new value.
+    async fn add(
+        &self,
+        /// How much to add.
+        by: i64,
+    ) -> ApiResult<i64>;
+}
+```
+
+This generates `CounterRequest`/`CounterResponse`, a `CounterApiDispatcher`
+(`Caller`), a `RemoteCounterApi` client and `counter_api_tool_router::<A>()`.
+Pass the router to `simply_api::mcp::McpApiServer::new(api, router)` and serve
+it over any rmcp transport. The consumer also depends on `async-trait`,
+`serde` and `schemars` for its own types.
+`crates/simply-api/tests/derive.rs` is the worked example.
+
+## Licence
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT licence](LICENSE-MIT), at your option. Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion in this
+work, as defined in the Apache-2.0 licence, shall be dual licensed as above,
+without any additional terms or conditions.
 
 ## Provenance
 
 The four crates were **extracted from flux at `bae34fcf`** (change
-`okwotpou`), `crates/simply-{api,api-macros,history,op-macros}`, byte for byte except for:
+`okwotpou`), `crates/simply-{api,api-macros,history,op-macros}`. The code is
+byte for byte the same, except for:
 
-- each `Cargo.toml` inherits from this workspace exactly as it did from flux's;
-  only the version is reset to `0.1.0` (flux's was `0.7.5`);
-- three doc comments that ended in a dangling pointer to a flux research note
-  (`… —.`, `See.`) were closed off;
+- each `Cargo.toml` inherits from this workspace as it did from flux's, and
+  adds `repository`, `authors` and `readme`. The version is reset to `0.1.0`
+  (flux's was `0.7.5`);
+- doc comments that pointed at flux-only files were reworded: a research note
+  that had left three sentences dangling (`… —.`, `See.`), and the old path of
+  flux's history adapter;
 - `rust-toolchain.toml` (1.95.0) and `rustfmt.toml` are flux's.
 
 flux, tussen and sense are not yet migrated onto this repo. Each still carries
@@ -54,13 +94,16 @@ its own copy, or none.
 
 ## The divergent copy in sense
 
-`~/projects/simply/sense` (main `9644bfff`) carries its own copy of all four
+The sense repo (main `9644bfff`) carries its own copy of all four
 crates, snapshotted from flux on 2026-09-03/04. The comparison is in
 [`docs/research/sense-copy.md`](docs/research/sense-copy.md). In short, **sense
 has nothing flux lacks.** Its copy is an older flux. Every difference is
 either something flux added after the snapshot or a formatting difference.
 
-## Gates
+## Development
 
     cargo test --workspace
-    cargo clippy --workspace --all-targets     # 0 warnings
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo fmt --all --check
+
+CI (`.github/workflows/ci.yml`) runs all three on Linux and macOS.

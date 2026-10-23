@@ -1,6 +1,7 @@
 # simply-kit — shared infrastructure crates for the simply projects (flux,
 # tussen, sense). "simply-kit" is a working name: the repo directory, this
-# comment, README.md and AGENTS.md are the only places it is spelled.
+# file's `repository`, README.md and AGENTS.md are the only places it is
+# spelled — a rename touches those and the GitHub repo.
 [workspace]
 resolver = "2"
 members = [
@@ -14,6 +15,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/poucet/simply-kit"
+authors = ["Christophe Poucet"]
 
 [workspace.dependencies]
 # The kit's own crates, declared once; members depend on siblings with

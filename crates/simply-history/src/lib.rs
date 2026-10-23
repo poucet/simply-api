@@ -1,8 +1,8 @@
 //! A generic undo/redo history **tree** over an op log — no domain deps.
 //!
-//! Extracted from Simply Flux's engine history (`flux-engine/src/history.rs`,
-//! now a thin adapter over this crate); designed for any document-shaped
-//! state whose edits record reversible primitive ops:
+//! Extracted from Simply Flux's engine history (flux keeps a thin adapter
+//! over this crate); designed for any document-shaped state whose edits
+//! record reversible primitive ops:
 //!
 //! - **Ops** ([`Op`]): the primitive reversible mutations a transaction
 //!   recorded. Consumers whose op type is local implement [`Op`] (one

@@ -4,6 +4,9 @@ description = "#[derive(Op)]: read-vs-mutate classification and label templates 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
 
 [lib]
 proc-macro = true
