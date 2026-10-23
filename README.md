@@ -1,13 +1,12 @@
-# simply-kit
+# simply-api
 
 Shared infrastructure crates for the simply projects: one async trait that
 derives MCP tools, dispatch and typed clients, plus the undo/redo history it
 records operations into. Nothing in here knows about audio, music, or any one
 app.
 
-"simply-kit" is a working name. It is spelled in this README, `AGENTS.md`, and
-`Cargo.toml` (`repository`); a rename touches those, the directory and the
-GitHub repo.
+The repo is named after its main crate, `simply-api`. The other three crates
+are what that crate is built on.
 
 ## Crates
 
@@ -33,10 +32,10 @@ Depend on a tag, declared once at the consumer's workspace root:
 
 ```toml
 [workspace.dependencies]
-simply-api = { git = "https://github.com/poucet/simply-kit", tag = "v0.1.0" }
+simply-api = { git = "https://github.com/poucet/simply-api", tag = "v0.1.0" }
 # or, for an undo tree with no API:
-simply-history = { git = "https://github.com/poucet/simply-kit", tag = "v0.1.0" }
-simply-op-macros = { git = "https://github.com/poucet/simply-kit", tag = "v0.1.0" }
+simply-history = { git = "https://github.com/poucet/simply-api", tag = "v0.1.0" }
+simply-op-macros = { git = "https://github.com/poucet/simply-api", tag = "v0.1.0" }
 ```
 
 `Cargo.lock` pins the commit. A newer tag means bumping `tag` and running

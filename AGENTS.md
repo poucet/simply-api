@@ -1,4 +1,4 @@
-# AGENTS — simply-kit
+# AGENTS — simply-api
 
 **Read @SYSTEM.md first.** It describes the working system: the roles, the doc
 web and the landing rules, shared with every project run this way. This file
@@ -15,16 +15,16 @@ workspace. Recreate them with:
 ## What this repo is
 
 **Generic infrastructure shared by more than one simply project.** The first
-users are flux, tussen v2 and sense. "simply-kit" is a working name; see
-README.md. A crate belongs here when two projects would otherwise each keep a
-copy and drift apart. **Nothing here may depend on a project crate** (`flux-*`,
-`tussen-*`, …): a kit that depends on a project drags the project into every
-consumer. Musical vocabulary goes to `~/projects/simply/music-rs`.
+users are flux, tussen v2 and sense. The repo is named after its main crate.
+A crate belongs here when two projects would otherwise each keep a copy and
+drift apart. **Nothing here may depend on a project crate** (`flux-*`,
+`tussen-*`, …): a shared crate that depends on a project drags the project
+into every consumer. Musical vocabulary goes to `~/projects/simply/music-rs`.
 
-Consumers pin a **git tag** on `https://github.com/poucet/simply-kit`, which is
+Consumers pin a **git tag** on `https://github.com/poucet/simply-api`, which is
 public because tussen is open source. **Push a tag before any consumer
-references it**, or that consumer's CI breaks. A change that a consumer needs is a commit here,
-then a tag, then a bump to that tag in the consumer.
+references it**, or that consumer's CI breaks. A change that a consumer needs
+is a commit here, then a tag, then a bump to that tag in the consumer.
 The version lives once, in `[workspace.package]`.
 
 ## Gates
