@@ -1,0 +1,5 @@
+# Same compiler + clippy as flux (bae34fcf), so a gate here and a gate in a
+# consumer agree on lints.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]

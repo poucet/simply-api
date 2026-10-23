@@ -1,0 +1,7 @@
+target/
+.workspaces/
+docs/scratch/
+.claude/
+.pi/
+/SYSTEM.md
+.DS_Store

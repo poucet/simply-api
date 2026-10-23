@@ -1,0 +1,28 @@
+# simply-kit — shared infrastructure crates for the simply projects (flux,
+# tussen, sense). "simply-kit" is a working name: the repo directory, this
+# comment, README.md and AGENTS.md are the only places it is spelled.
+[workspace]
+resolver = "2"
+members = [
+    "crates/simply-api",
+    "crates/simply-api-macros",
+    "crates/simply-history",
+    "crates/simply-op-macros",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# The kit's own crates, declared once; members depend on siblings with
+# `<crate>.workspace = true`. A consumer depends on them by git tag instead.
+simply-api = { path = "crates/simply-api" }
+simply-api-macros = { path = "crates/simply-api-macros" }
+simply-history = { path = "crates/simply-history" }
+simply-op-macros = { path = "crates/simply-op-macros" }
+
+# Same requirements as flux's workspace at bae34fcf.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
