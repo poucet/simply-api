@@ -14,7 +14,7 @@ const VERSION: u32 = 1;
 /// One delivery: an event's body, to one target.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Entry {
-    /// `X-Simply-Delivery`: the same on every attempt.
+    /// `X-Hook-Delivery`: the same on every attempt.
     pub id: String,
     pub event: String,
     pub url: String,

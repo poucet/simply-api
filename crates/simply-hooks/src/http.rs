@@ -79,21 +79,32 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
         .clone()
 }
 
+/// What came back: the status, and `Retry-After` in seconds when given so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Answer {
+    pub code: u16,
+    pub retry_after: Option<u64>,
+}
+
 /// POST `body` to `to` with `headers`, within `timeout` from connect to the
-/// status line: the response's status code, or why there is none.
+/// answer's head: the answer, or why there is none.
 pub(crate) async fn post(
     to: &Endpoint,
     headers: &[(&str, String)],
     body: &[u8],
     timeout: Duration,
-) -> Result<u16, String> {
+) -> Result<Answer, String> {
     match tokio::time::timeout(timeout, exchange(to, headers, body)).await {
         Ok(r) => r,
         Err(_) => Err(format!("no answer within {} s", timeout.as_secs_f32())),
     }
 }
 
-async fn exchange(to: &Endpoint, headers: &[(&str, String)], body: &[u8]) -> Result<u16, String> {
+async fn exchange(
+    to: &Endpoint,
+    headers: &[(&str, String)],
+    body: &[u8],
+) -> Result<Answer, String> {
     let tcp = TcpStream::connect((to.host.as_str(), to.port))
         .await
         .map_err(|e| format!("could not connect: {e}"))?;
@@ -116,7 +127,7 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
     to: &Endpoint,
     headers: &[(&str, String)],
     body: &[u8],
-) -> Result<u16, String> {
+) -> Result<Answer, String> {
     let mut head = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         to.path,
@@ -146,7 +157,14 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
         let mut res = httparse::Response::new(&mut hs);
         match res.parse(&buf) {
             Ok(httparse::Status::Complete(_)) => {
-                return res.code.ok_or_else(|| "an answer with no status".to_owned())
+                let code = res.code.ok_or_else(|| "an answer with no status".to_owned())?;
+                let retry_after = res
+                    .headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("retry-after"))
+                    .and_then(|h| std::str::from_utf8(h.value).ok())
+                    .and_then(|v| v.trim().parse().ok());
+                return Ok(Answer { code, retry_after });
             }
             Ok(httparse::Status::Partial) if buf.len() < MAX_HEAD => continue,
             Ok(httparse::Status::Partial) => return Err("an answer too long to read".into()),

@@ -29,6 +29,8 @@ impl Got {
 #[derive(Clone, Copy)]
 enum Answer {
     Status(u16),
+    /// A status with `Retry-After: <seconds>`.
+    RetryAfter(u16, u64),
     /// Read the request, never answer.
     Hang,
 }
@@ -90,6 +92,9 @@ impl Receiver {
                             let _ =
                                 write!(stream, "HTTP/1.1 {code} X\r\nContent-Length: 2\r\n\r\nok");
                         }
+                        Answer::RetryAfter(code, secs) => {
+                            let _ = write!(stream, "HTTP/1.1 {code} X\r\nRetry-After: {secs}\r\nContent-Length: 0\r\n\r\n");
+                        }
                         Answer::Hang => std::thread::sleep(Duration::from_secs(30)),
                     }
                 });
@@ -125,10 +130,10 @@ fn config(outbox: Option<PathBuf>) -> Config {
 }
 
 fn check_signed(g: &Got, secret: &str) {
-    let ts: u64 = g.header("x-simply-timestamp").parse().unwrap();
+    let ts: u64 = g.header("x-timestamp").parse().unwrap();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     assert!(now.abs_diff(ts) <= 5, "the timestamp is this attempt's");
-    let sig = g.header("x-simply-signature");
+    let sig = g.header("x-signature");
     assert!(sig.starts_with("sha256=") && sig.len() == 7 + 64, "{sig}");
     assert_eq!(sig, sign::sign(secret.as_bytes(), ts, g.body.as_bytes()));
     assert!(sign::verify(secret.as_bytes(), ts, g.body.as_bytes(), sig));
@@ -144,9 +149,9 @@ fn an_event_arrives_signed_in_the_envelope() {
     let g = &got[0];
     assert_eq!(g.path, "/hooks/in");
     assert_eq!(g.header("content-type"), "application/json");
-    assert_eq!(g.header("x-simply-event"), "app.started");
+    assert_eq!(g.header("x-hook-event"), "app.started");
     assert_eq!(g.header("user-agent"), "simply-hooks-test/1");
-    let id = g.header("x-simply-delivery");
+    let id = g.header("x-hook-delivery");
     assert_eq!((id.len(), id.as_bytes()[14]), (36, b'4'), "a UUID v4: {id}");
     check_signed(g, "s3cret");
     let body: serde_json::Value = serde_json::from_str(&g.body).unwrap();
@@ -167,7 +172,7 @@ fn a_retry_keeps_its_delivery_id_and_signs_again() {
     hooks.emit("jam.started", serde_json::json!({ "session": "a" }));
     let got = rx.wait_for(3);
     assert!(hooks.wait_idle(Duration::from_secs(10)));
-    let ids: Vec<&str> = got.iter().map(|g| g.header("x-simply-delivery")).collect();
+    let ids: Vec<&str> = got.iter().map(|g| g.header("x-hook-delivery")).collect();
     assert!(ids.iter().all(|i| *i == ids[0]), "{ids:?}");
     assert!(got.iter().all(|g| g.body == got[0].body), "the same body");
     for g in &got {
@@ -225,7 +230,7 @@ fn the_outbox_outlives_a_restart() {
     let hooks = Hooks::new(config(Some(outbox.clone())).target(Target::new(&url, "k"))).unwrap();
     let got = rx.wait_for(1);
     assert!(hooks.wait_idle(Duration::from_secs(10)));
-    assert_eq!(got[0].header("x-simply-delivery"), id, "the same delivery");
+    assert_eq!(got[0].header("x-hook-delivery"), id, "the same delivery");
     check_signed(&got[0], "k");
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&outbox).unwrap()).unwrap();
@@ -269,7 +274,7 @@ fn each_target_gets_only_the_events_it_allows() {
     assert!(hooks.wait_idle(Duration::from_secs(10)));
     let names = |r: &Receiver| {
         let mut v: Vec<String> =
-            r.got().iter().map(|g| g.header("x-simply-event").to_owned()).collect();
+            r.got().iter().map(|g| g.header("x-hook-event").to_owned()).collect();
         v.sort();
         v
     };
@@ -307,4 +312,31 @@ fn a_bad_url_is_said_and_never_dialled() {
     let s = hooks.status();
     assert_eq!(s.pending, 0);
     assert!(s.targets[0].last_error.as_deref().unwrap().contains("https://"), "{s:?}");
+}
+
+#[test]
+fn retry_after_is_honoured_when_later_than_the_backoff() {
+    let rx = Receiver::start([Answer::RetryAfter(429, 1)]);
+    let hooks = Hooks::new(config(None).target(Target::new(&rx.url, "k"))).unwrap();
+    let t = Instant::now();
+    hooks.emit("bug.filed", serde_json::json!({}));
+    let got = rx.wait_for(2);
+    assert!(
+        t.elapsed() >= Duration::from_millis(900),
+        "waited as asked, not 100 ms: {:?}",
+        t.elapsed()
+    );
+    assert_eq!(got[0].header("x-hook-delivery"), got[1].header("x-hook-delivery"));
+}
+
+#[test]
+fn a_body_over_the_limit_is_never_queued() {
+    let rx = Receiver::start([]);
+    let hooks = Hooks::new(config(None).max_body(1024).target(Target::new(&rx.url, "k"))).unwrap();
+    hooks.emit("bug.filed", serde_json::json!({ "log": "x".repeat(2000) }));
+    hooks.emit("bug.filed", serde_json::json!({ "log": "short" }));
+    assert!(hooks.wait_idle(Duration::from_secs(5)));
+    let got = rx.got();
+    assert_eq!(got.len(), 1);
+    assert!(got[0].body.contains("short"));
 }

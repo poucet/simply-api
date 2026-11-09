@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::http::{self, Endpoint};
+use crate::http::{self, Answer, Endpoint};
 use crate::outbox::{Entry, Outbox};
 use crate::sign;
 use crate::{Config, Status, Target, TargetStatus};
@@ -34,17 +34,24 @@ enum Outcome {
     Delivered,
     /// Refused for good: retrying won't change the answer.
     Refused(u16),
-    Failed(String),
+    /// Try again, not before the receiver's `Retry-After` (seconds).
+    Failed(String, Option<u64>),
 }
 
-fn classify(r: Result<u16, String>) -> Outcome {
+fn classify(r: Result<Answer, String>) -> Outcome {
     match r {
-        Ok(200..=299) => Outcome::Delivered,
-        Ok(code @ (408 | 425 | 429 | 500..=599)) => Outcome::Failed(format!("HTTP {code}")),
-        Ok(code) => Outcome::Refused(code),
-        Err(e) => Outcome::Failed(e),
+        Ok(Answer { code: 200..=299, .. }) => Outcome::Delivered,
+        Ok(Answer { code: code @ (408 | 425 | 429 | 500..=599), retry_after }) => {
+            Outcome::Failed(format!("HTTP {code}"), retry_after)
+        }
+        Ok(Answer { code, .. }) => Outcome::Refused(code),
+        Err(e) => Outcome::Failed(e, None),
     }
 }
+
+/// The longest `Retry-After` honoured: a receiver can't park a delivery
+/// for longer than this.
+const MAX_RETRY_AFTER: u64 = 3600;
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -217,8 +224,9 @@ impl Worker {
                     s.last_error = Some(format!("refused: HTTP {code}"));
                     s.last_error_at = Some(at);
                 }
-                Outcome::Failed(why) => {
-                    let delay = self.config.retry.after(attempts);
+                Outcome::Failed(why, retry_after) => {
+                    let asked = Duration::from_secs(retry_after.unwrap_or(0).min(MAX_RETRY_AFTER));
+                    let delay = self.config.retry.after(attempts).max(asked);
                     self.outbox.entries[i].next_ms = now_ms() + delay.as_millis() as u64;
                     tracing::warn!(
                         "webhooks: {event} delivery {id} to {host} failed (attempt {attempts}): {why}; again in {} s",

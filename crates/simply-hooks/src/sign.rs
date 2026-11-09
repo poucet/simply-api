@@ -1,6 +1,6 @@
 //! The signature: `sha256=<hex HMAC-SHA256(secret, "<timestamp>.<raw body>")>`.
 //!
-//! The timestamp is the `X-Simply-Timestamp` header's value as sent (unix
+//! The timestamp is the `X-Timestamp` header's value as sent (unix
 //! seconds, decimal), and the body is the exact bytes of the request body.
 //! A receiver recomputes it over what it received and compares in constant
 //! time ([`verify`]); it should also refuse a timestamp too far from its own
@@ -9,15 +9,15 @@
 use ring::hmac;
 
 /// The header names, as sent.
-pub const EVENT_HEADER: &str = "X-Simply-Event";
-pub const DELIVERY_HEADER: &str = "X-Simply-Delivery";
-pub const TIMESTAMP_HEADER: &str = "X-Simply-Timestamp";
-pub const SIGNATURE_HEADER: &str = "X-Simply-Signature";
+pub const EVENT_HEADER: &str = "X-Hook-Event";
+pub const DELIVERY_HEADER: &str = "X-Hook-Delivery";
+pub const TIMESTAMP_HEADER: &str = "X-Timestamp";
+pub const SIGNATURE_HEADER: &str = "X-Signature";
 
 /// The signature header's prefix.
 pub const PREFIX: &str = "sha256=";
 
-/// `X-Simply-Signature`'s value for `body` sent at `timestamp` (unix
+/// `X-Signature`'s value for `body` sent at `timestamp` (unix
 /// seconds) under `secret`.
 pub fn sign(secret: &[u8], timestamp: u64, body: &[u8]) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
@@ -29,16 +29,20 @@ pub fn sign(secret: &[u8], timestamp: u64, body: &[u8]) -> String {
 }
 
 /// Does `signature` (the header's value) sign `body` at `timestamp` under
-/// `secret`? Compared in constant time.
+/// `secret`? Compared in constant time. Several signatures separated by
+/// commas (a secret being rotated) pass when any one does.
 pub fn verify(secret: &[u8], timestamp: u64, body: &[u8], signature: &str) -> bool {
-    let Some(hex_sig) = signature.strip_prefix(PREFIX) else { return false };
-    let Some(tag) = unhex(hex_sig) else { return false };
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let mut msg = Vec::with_capacity(body.len() + 21);
     msg.extend_from_slice(timestamp.to_string().as_bytes());
     msg.push(b'.');
     msg.extend_from_slice(body);
-    hmac::verify(&key, &msg, &tag).is_ok()
+    signature.split(',').any(|one| {
+        one.trim()
+            .strip_prefix(PREFIX)
+            .and_then(unhex)
+            .is_some_and(|tag| hmac::verify(&key, &msg, &tag).is_ok())
+    })
 }
 
 /// Lowercase hex.
@@ -87,5 +91,7 @@ mod tests {
         assert!(!verify(b"whsec_test_123", 1700000000, &body[1..], &sig), "another body");
         assert!(!verify(b"whsec_test_123", 1700000000, body, &sig[7..]), "no prefix");
         assert!(!verify(b"whsec_test_123", 1700000000, body, "sha256=zz"), "not hex");
+        let rotating = format!("sha256={}, {sig}", "0".repeat(64));
+        assert!(verify(b"whsec_test_123", 1700000000, body, &rotating), "any one of several");
     }
 }

@@ -16,13 +16,16 @@
 //! | Header | Value |
 //! |---|---|
 //! | `Content-Type` | `application/json` |
-//! | `X-Simply-Event` | the event's name, as in the body |
-//! | `X-Simply-Delivery` | a UUID v4, the same on every attempt of one delivery |
-//! | `X-Simply-Timestamp` | when this attempt was signed, unix seconds |
-//! | `X-Simply-Signature` | `sha256=` + lowercase hex HMAC-SHA256(secret, `"<timestamp>.<raw body>"`) |
+//! | `X-Signature` | `sha256=` + lowercase hex HMAC-SHA256(secret, `"<timestamp>.<raw body>"`) |
+//! | `X-Timestamp` | when this attempt was signed, unix seconds |
+//! | `X-Hook-Delivery` | a UUID v4, the same on every attempt of one delivery |
+//! | `X-Hook-Event` | the event's name, as in the body (a receiver may ignore it) |
+//!
+//! This is the scheme Lumina's hooks listener verifies and simply.audio
+//! sends.
 //!
 //! A retry sends the same body and delivery id with a fresh timestamp and
-//! signature, so a receiver deduplicates on `X-Simply-Delivery` and refuses
+//! signature, so a receiver deduplicates on `X-Hook-Delivery` and refuses
 //! a timestamp far from its own clock. `at` is when the event happened, not
 //! when it was sent.
 //!
@@ -31,7 +34,7 @@
 //! - secret: `whsec_test_123`
 //! - timestamp: `1700000000`
 //! - body: `{"event":"jam.started","at":"2023-11-14T22:13:20Z","data":{"participants":2,"session":"3f2a9c"}}`
-//! - `X-Simply-Signature`: `sha256=0f9a8cf6653bad9a5bcf9b884970aa7e37933e85c2316e33c681533688a003f4`
+//! - `X-Signature`: `sha256=0f9a8cf6653bad9a5bcf9b884970aa7e37933e85c2316e33c681533688a003f4`
 //!
 //! ```
 //! let body = br#"{"event":"jam.started","at":"2023-11-14T22:13:20Z","data":{"participants":2,"session":"3f2a9c"}}"#;
@@ -44,9 +47,12 @@
 //! # Delivery
 //!
 //! - A `2xx` answer delivers it. `408`, `425`, `429`, `5xx`, a timeout or a
-//!   network error is retried with backoff ([`Retry`]) until the delivery is
+//!   network error is retried with backoff ([`Retry`]), or after the answer's
+//!   `Retry-After` seconds when that is later, until the delivery is
 //!   older than [`Retry::max_age`]. Any other answer (a wrong secret's `401`,
 //!   a `404`, a redirect) is refused for good: retrying would get the same.
+//! - A body over [`Config::max_body`] (256 KiB by default, what Lumina
+//!   takes) is refused at `emit`, logged, and never queued.
 //! - `https://` only, but for a loopback host (`http://localhost:…`).
 //!   Redirects are not followed and the answer's body is never read.
 //! - Failures are logged with the event, the delivery id and the target's
@@ -188,11 +194,13 @@ pub struct Config {
     pub max_pending: usize,
     /// `User-Agent`, e.g. `tussen/0.10.2`.
     pub user_agent: String,
+    /// The largest body `emit` queues, in bytes.
+    pub max_body: usize,
 }
 
 impl Config {
     /// No targets yet; a 10 s timeout, [`Retry::default`], 1000 deliveries
-    /// at most.
+    /// at most, bodies up to 256 KiB.
     pub fn new(outbox: Option<PathBuf>, user_agent: impl Into<String>) -> Config {
         Config {
             targets: vec![],
@@ -201,6 +209,7 @@ impl Config {
             timeout: Duration::from_secs(10),
             max_pending: 1000,
             user_agent: user_agent.into(),
+            max_body: 256 * 1024,
         }
     }
 
@@ -221,6 +230,11 @@ impl Config {
 
     pub fn timeout(mut self, t: Duration) -> Config {
         self.timeout = t;
+        self
+    }
+
+    pub fn max_body(mut self, bytes: usize) -> Config {
+        self.max_body = bytes;
         self
     }
 
@@ -277,6 +291,7 @@ pub fn valid_event(event: &str) -> bool {
 pub struct Hooks {
     tx: mpsc::UnboundedSender<worker::Msg>,
     shared: Arc<worker::Shared>,
+    max_body: usize,
 }
 
 impl Hooks {
@@ -285,13 +300,14 @@ impl Hooks {
     pub fn new(config: Config) -> std::io::Result<Hooks> {
         let (tx, rx) = mpsc::unbounded_channel();
         let shared = Arc::new(worker::Shared::default());
+        let max_body = config.max_body;
         worker::spawn(config, shared.clone(), rx)?;
-        Ok(Hooks { tx, shared })
+        Ok(Hooks { tx, shared, max_body })
     }
 
     /// Queue `event` with `data` for every target that wants it, and return
-    /// at once. A name [`valid_event`] refuses, or data that isn't JSON, is
-    /// logged and dropped.
+    /// at once. A name [`valid_event`] refuses, data that isn't JSON, or a
+    /// body over [`Config::max_body`] is logged and dropped.
     pub fn emit(&self, event: &str, data: impl Serialize) {
         if !valid_event(event) {
             tracing::warn!("webhooks: {event:?} is not an event name: not sent");
@@ -308,6 +324,14 @@ impl Hooks {
         let at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let body =
             serde_json::to_string(&Envelope { event, at, data }).expect("a Value serializes");
+        if body.len() > self.max_body {
+            tracing::warn!(
+                "webhooks: {event} is {} bytes, over {}: not sent",
+                body.len(),
+                self.max_body
+            );
+            return;
+        }
         let created = now.timestamp().max(0) as u64;
         self.send(worker::Msg::Emit { event: event.to_owned(), body, created });
     }
