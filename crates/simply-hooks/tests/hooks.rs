@@ -340,3 +340,25 @@ fn a_body_over_the_limit_is_never_queued() {
     assert_eq!(got.len(), 1);
     assert!(got[0].body.contains("short"));
 }
+
+#[test]
+fn an_unsigned_target_gets_no_signature_but_its_delivery_id() {
+    let (signed, open) = (Receiver::start([]), Receiver::start([Answer::Status(503)]));
+    let hooks = Hooks::new(
+        config(None)
+            .target(Target::new(&signed.url, "k"))
+            .target(Target::unsigned(&open.url).events(["bug.filed"])),
+    )
+    .unwrap();
+    hooks.emit("bug.filed", serde_json::json!({ "title": "x" }));
+    let got = open.wait_for(2);
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    for g in &got {
+        assert_eq!(g.header("x-signature"), "", "unsigned");
+        assert_eq!(g.header("x-timestamp"), "");
+        assert_eq!(g.header("x-hook-event"), "bug.filed");
+    }
+    assert_eq!(got[0].header("x-hook-delivery"), got[1].header("x-hook-delivery"), "kept on retry");
+    assert_eq!(got[0].header("x-hook-delivery").len(), 36);
+    check_signed(&signed.wait_for(1)[0], "k");
+}

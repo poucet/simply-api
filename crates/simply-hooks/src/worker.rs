@@ -185,16 +185,18 @@ impl Worker {
                 continue;
             };
             let ts = now / 1000;
-            let headers = vec![
+            let mut headers = vec![
                 (sign::EVENT_HEADER, e.event.clone()),
                 (sign::DELIVERY_HEADER, e.id.clone()),
-                (sign::TIMESTAMP_HEADER, ts.to_string()),
-                (
-                    sign::SIGNATURE_HEADER,
-                    sign::sign(target.secret.0.as_bytes(), ts, e.body.as_bytes()),
-                ),
                 ("User-Agent", self.config.user_agent.clone()),
             ];
+            if let Some(secret) = &target.secret {
+                headers.push((sign::TIMESTAMP_HEADER, ts.to_string()));
+                headers.push((
+                    sign::SIGNATURE_HEADER,
+                    sign::sign(secret.0.as_bytes(), ts, e.body.as_bytes()),
+                ));
+            }
             let (endpoint, body, timeout) = (endpoint.clone(), e.body.clone(), self.config.timeout);
             set.spawn(async move {
                 (i, http::post(&endpoint, &headers, body.as_bytes(), timeout).await)

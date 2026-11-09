@@ -16,16 +16,20 @@
 //! | Header | Value |
 //! |---|---|
 //! | `Content-Type` | `application/json` |
-//! | `X-Signature` | `sha256=` + lowercase hex HMAC-SHA256(secret, `"<timestamp>.<raw body>"`) |
-//! | `X-Timestamp` | when this attempt was signed, unix seconds |
 //! | `X-Hook-Delivery` | a UUID v4, the same on every attempt of one delivery |
 //! | `X-Hook-Event` | the event's name, as in the body (a receiver may ignore it) |
+//! | `X-Signature` | signed targets only: `sha256=` + lowercase hex HMAC-SHA256(secret, `"<timestamp>.<raw body>"`) |
+//! | `X-Timestamp` | signed targets only: when this attempt was signed, unix seconds |
+//!
+//! A target has a secret or not ([`Target::unsigned`]): a public intake
+//! (a receiver that keeps no secret for the sender) takes unsigned
+//! deliveries, which carry no `X-Signature` and no `X-Timestamp`.
 //!
 //! This is the scheme Lumina's hooks listener verifies and simply.audio
 //! sends.
 //!
-//! A retry sends the same body and delivery id with a fresh timestamp and
-//! signature, so a receiver deduplicates on `X-Hook-Delivery` and refuses
+//! A retry sends the same body and delivery id (signed: with a fresh
+//! timestamp and signature), so a receiver deduplicates on `X-Hook-Delivery` and refuses
 //! a timestamp far from its own clock. `at` is when the event happened, not
 //! when it was sent.
 //!
@@ -128,20 +132,27 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-/// Where events go: a URL, the secret its signatures use, and which events
-/// it wants.
+/// Where events go: a URL, the secret its signatures use (`None`: sent
+/// unsigned), and which events it wants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub url: String,
-    pub secret: Secret,
+    pub secret: Option<Secret>,
     /// `None`: every event. Otherwise each name exactly, or a prefix ending
     /// in `*` (`"jam.*"`).
     pub events: Option<Vec<String>>,
 }
 
 impl Target {
+    /// A target whose deliveries are signed with `secret`.
     pub fn new(url: impl Into<String>, secret: impl Into<String>) -> Target {
-        Target { url: url.into(), secret: Secret::new(secret), events: None }
+        Target { url: url.into(), secret: Some(Secret::new(secret)), events: None }
+    }
+
+    /// A target whose deliveries go unsigned: no `X-Signature`, no
+    /// `X-Timestamp` (a public intake that keeps no secret for senders).
+    pub fn unsigned(url: impl Into<String>) -> Target {
+        Target { url: url.into(), secret: None, events: None }
     }
 
     /// Only these events (exact names, or prefixes ending in `*`).
