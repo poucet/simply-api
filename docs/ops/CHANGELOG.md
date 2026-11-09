@@ -5,7 +5,7 @@ What got added, per landing — dated with a clock and the jj change id
 
 ## Unreleased
 
-#### `simply-hooks`: signed outbound webhooks · 2026-11-09 09:50 · wnxonwuo, yzloxkmn
+#### `simply-hooks`: signed outbound webhooks · 2026-11-09 10:05 · wnxonwuo, yzloxkmn, sqlzlqtw
 
 - New crate **`simply-hooks`**. An app calls `emit(event, data)` and it
   returns at once; a worker thread POSTs
@@ -32,6 +32,9 @@ What got added, per landing — dated with a clock and the jj change id
   settings while the app runs.
 - Nothing is added to the lockfile: the HTTP client is one POST over
   tokio and rustls, which the workspace already built.
+- The receiver's whole answer (headers and body) is read, so a later
+  follow-up to a bug report can pick up a session id from the reply and
+  long-poll with the same signed POST. Nothing changes for apps yet.
 
 #### `simply-relay`: an app can link itself to Lumina · 2026-11-09 08:35 · vmlmllrk..ouppwpny
 
