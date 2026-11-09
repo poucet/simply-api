@@ -3,6 +3,36 @@
 What got added, per landing — dated with a clock and the jj change id
 (one entry per landing, newest first).
 
+## Unreleased
+
+#### `simply-relay`: an app can link itself to Lumina · 2026-11-09 08:35 · vmlmllrk..ouppwpny
+
+- New crate **`simply-relay`**. An app (tussen, flux) opens a WebSocket out to
+  Lumina and serves its existing MCP tools there, so Lumina can check a
+  member's setup when they report a bug. Nothing on the member's side
+  listens, so NAT and firewalls don't matter. The crate does not depend on
+  `simply-api`, so an app can adopt it before it migrates to `simply-api`.
+- The member links an app by pasting the one-time code `/support link`
+  shows. The app keeps one file, `lumina.toml`, readable by the member
+  only (0600). It holds the device token, which Lumina replaces on every
+  connect, and the consent switches.
+- Everything is **off by default**. One switch allows read-only diagnostics.
+  Each action class (jam sessions, later) has its own switch. A tool that
+  isn't switched on is neither listed nor run: the app refuses it before its
+  own code sees it. Each app lists its read-only tools by hand.
+- Every call Lumina makes, allowed or refused, is written to
+  `lumina-calls.log` beside the token file, with the reason Lumina gave.
+  Argument values are not written.
+- Every app gets the same diagnostics: `lumina_about`, `lumina_config`
+  (secrets blanked by the app's redactor and then by key name, home
+  directory shown as `~`), `lumina_errors`, `lumina_log` and
+  `lumina_report`. A tracing layer, `simply_relay::log_layer()`, keeps the
+  log lines they read.
+- Apps compile it in behind their own optional `lumina` feature.
+- A test shows Lumina's rmcp 1.3 client working with the apps' rmcp 3.x
+  servers over this connection, protocol `2025-06-18`. It lives in the
+  dev-only crate `relay-compat`, which is never published.
+
 ## 0.1.1 — 2026-10-23
 
 #### MIT only (`LICENSE-MIT-ONLY`) · 2026-10-23 · kxrnwllw
