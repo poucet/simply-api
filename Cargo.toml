@@ -8,6 +8,7 @@ members = [
     "crates/simply-history",
     "crates/simply-op-macros",
     "crates/simply-relay",
+    "crates/simply-hooks",
     "crates/relay-compat",
 ]
 
@@ -26,6 +27,7 @@ simply-api-macros = { path = "crates/simply-api-macros" }
 simply-history = { path = "crates/simply-history" }
 simply-op-macros = { path = "crates/simply-op-macros" }
 simply-relay = { path = "crates/simply-relay" }
+simply-hooks = { path = "crates/simply-hooks" }
 
 # Same requirements as flux's workspace at bae34fcf.
 serde = { version = "1", features = ["derive"] }

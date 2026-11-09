@@ -6,7 +6,7 @@ records operations into. Nothing in here knows about audio, music, or any one
 app.
 
 The repo is named after its main crate, `simply-api`. Three more crates are
-what that crate is built on; `simply-relay` stands on its own.
+what that crate is built on; `simply-relay` and `simply-hooks` stand on their own.
 
 ## Crates
 
@@ -17,6 +17,7 @@ what that crate is built on; `simply-relay` stands on its own.
 | `simply-history` | a generic undo/redo history tree: arena, MRU branches, undo/redo/goto, prune, serde, a journal |
 | `simply-op-macros` | `#[derive(Op)]`: read-vs-mutate classification and label templates for operation enums |
 | `simply-relay` | an app dials out to Lumina over a WebSocket and serves any rmcp 3.x `ServerHandler` there: pairing by code, a token file rotated on each connect, the member's consent switches enforced in the app, a local call log, and standard read-only diagnostics. It does not depend on `simply-api`. Apps compile it in behind their own optional `lumina` feature |
+| `simply-hooks` | signed outbound webhooks: `emit(event, data)` returns at once, a worker thread POSTs `{event, at, data}` to each target that wants it, signed `X-Simply-Signature: sha256=HMAC(secret, "<timestamp>.<body>")`, with retries from a small outbox file that survives a restart. The scheme and its test vector are in the crate docs. It does not depend on `simply-api`, and adds no crate this workspace didn't already build |
 | `relay-compat` | dev only, never published: tests that Lumina's rmcp 1.3 client and the apps' rmcp 3.x servers talk over the relay |
 
 A consumer depends on `simply-api` alone and gets the other three through it,
