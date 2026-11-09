@@ -1,0 +1,22 @@
+[package]
+name = "simply-relay"
+description = "An app dials out to Lumina over a WebSocket and serves its MCP tools there, gated by the member's consent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Deliberately independent of `simply-api`: it serves any rmcp 3.x
+# `ServerHandler`, so an app can adopt it before it uses simply-api.
+[dependencies]
+futures = "0.3"
+rmcp = { version = "3.1.4", default-features = false, features = ["server"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
