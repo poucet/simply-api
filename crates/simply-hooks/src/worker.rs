@@ -31,7 +31,11 @@ pub(crate) struct Shared {
 
 /// How one attempt ended.
 enum Outcome {
-    Delivered,
+    /// With what the receiver said back: what a caller waiting on a reply
+    /// (a session id in `bug.filed`'s, for a follow-up long poll) would be
+    /// handed. Nothing reads it yet.
+    #[allow(dead_code)]
+    Delivered(Answer),
     /// Refused for good: retrying won't change the answer.
     Refused(u16),
     /// Try again, not before the receiver's `Retry-After` (seconds).
@@ -40,11 +44,11 @@ enum Outcome {
 
 fn classify(r: Result<Answer, String>) -> Outcome {
     match r {
-        Ok(Answer { code: 200..=299, .. }) => Outcome::Delivered,
-        Ok(Answer { code: code @ (408 | 425 | 429 | 500..=599), retry_after }) => {
-            Outcome::Failed(format!("HTTP {code}"), retry_after)
+        Ok(a) if (200..=299).contains(&a.code) => Outcome::Delivered(a),
+        Ok(a) if matches!(a.code, 408 | 425 | 429 | 500..=599) => {
+            Outcome::Failed(format!("HTTP {}", a.code), a.retry_after())
         }
-        Ok(Answer { code, .. }) => Outcome::Refused(code),
+        Ok(a) => Outcome::Refused(a.code),
         Err(e) => Outcome::Failed(e, None),
     }
 }
@@ -207,7 +211,7 @@ impl Worker {
             let (event, id, url, attempts) =
                 (e.event.clone(), e.id.clone(), e.url.clone(), e.attempts);
             match classify(r) {
-                Outcome::Delivered => {
+                Outcome::Delivered(_) => {
                     done.push(i);
                     let s = self.status_of(&url);
                     s.delivered += 1;

@@ -78,12 +78,21 @@
 //!
 //! # Room for a pull mode
 //!
-//! An app behind a firewall that wants work *back* (long-polling a URL and
-//! acting on the answer) is not built. The push API is shaped so it can be
-//! added beside it: [`Config`] is `#[non_exhaustive]` and built by methods,
-//! so a `pull` setting is one more method; the signing ([`sign`]) and the
-//! envelope are public, so a poll request is signed the same way; and the
-//! worker owns its runtime, so a poll loop is one more task in it.
+//! Not built. Its scope is a bug's follow-up: after a `bug.filed`, the app
+//! long-polls its hook with the bug's session id, each poll's answer
+//! carries MCP JSON-RPC calls, and the results go back as another signed
+//! hook. What is in place for it:
+//!
+//! - the transport (`http::post`) reads the whole answer (status, headers
+//!   and a body up to 1 MiB) and takes its timeout per call, so a long poll
+//!   is the same signed POST with a longer timeout;
+//! - the worker sees each delivery's answer (a `bug.filed` reply's session
+//!   id), so a variant of [`Hooks::emit`] that hands its caller the
+//!   answer, and a poll loop as one more task on the worker's runtime, can
+//!   be added beside `emit` without changing it;
+//! - [`Config`] is `#[non_exhaustive]` and built by methods, and the
+//!   signing ([`sign`]) and the envelope are public, so polls and results
+//!   are signed the same way.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;

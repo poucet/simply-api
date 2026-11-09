@@ -4,7 +4,13 @@
 //! - `https://` anywhere; `http://` only to a loopback host (a local receiver,
 //!   the tests): a payload never crosses a network in clear.
 //! - `Connection: close`, no redirects followed, no proxy, no keep-alive.
-//! - Only the status line is read: the response's body is never looked at.
+//! - The answer is read whole (its head, then its body framed by
+//!   `Content-Length`, chunked, or the connection closing), up to
+//!   [`MAX_BODY`], so a caller can read what a receiver says back (a
+//!   session id in a reply). A body that is slow or broken after a complete
+//!   head is kept as far as it came: the status is what decides.
+//! - [`post`] takes its timeout per call: a long poll is a POST with a
+//!   longer one.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -15,6 +21,10 @@ use tokio::net::TcpStream;
 
 /// The most of a response's head read before giving up on it.
 const MAX_HEAD: usize = 16 * 1024;
+/// The most of a response's body kept.
+pub(crate) const MAX_BODY: usize = 1024 * 1024;
+/// How long a body may take once its head is in.
+const BODY_WAIT: Duration = Duration::from_secs(5);
 
 /// A target URL, checked once.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,11 +89,24 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
         .clone()
 }
 
-/// What came back: the status, and `Retry-After` in seconds when given so.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What came back: the status, the headers (names lowercase) and the body.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Answer {
     pub code: u16,
-    pub retry_after: Option<u64>,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Answer {
+    /// A header's value, by its lowercase name.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
+    /// `Retry-After`, when given in seconds.
+    pub fn retry_after(&self) -> Option<u64> {
+        self.header("retry-after").and_then(|v| v.trim().parse().ok())
+    }
 }
 
 /// POST `body` to `to` with `headers`, within `timeout` from connect to the
@@ -156,21 +179,72 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
         let mut hs = [httparse::EMPTY_HEADER; 64];
         let mut res = httparse::Response::new(&mut hs);
         match res.parse(&buf) {
-            Ok(httparse::Status::Complete(_)) => {
+            Ok(httparse::Status::Complete(at)) => {
                 let code = res.code.ok_or_else(|| "an answer with no status".to_owned())?;
-                let retry_after = res
+                let headers: Vec<(String, String)> = res
                     .headers
                     .iter()
-                    .find(|h| h.name.eq_ignore_ascii_case("retry-after"))
-                    .and_then(|h| std::str::from_utf8(h.value).ok())
-                    .and_then(|v| v.trim().parse().ok());
-                return Ok(Answer { code, retry_after });
+                    .map(|h| {
+                        (
+                            h.name.to_ascii_lowercase(),
+                            String::from_utf8_lossy(h.value).trim().to_owned(),
+                        )
+                    })
+                    .collect();
+                let mut answer = Answer { code, headers, body: buf[at..].to_vec() };
+                let _ = tokio::time::timeout(BODY_WAIT, read_body(&mut s, &mut answer)).await;
+                if answer.header("transfer-encoding").is_some_and(|t| t.contains("chunked")) {
+                    answer.body = dechunk(&answer.body);
+                }
+                answer.body.truncate(MAX_BODY);
+                return Ok(answer);
             }
             Ok(httparse::Status::Partial) if buf.len() < MAX_HEAD => continue,
             Ok(httparse::Status::Partial) => return Err("an answer too long to read".into()),
             Err(e) => return Err(format!("not an HTTP answer: {e}")),
         }
     }
+}
+
+/// Read the rest of `answer`'s body into it: up to its `Content-Length`,
+/// else until the connection closes, at most [`MAX_BODY`].
+async fn read_body<S: AsyncRead + Unpin>(s: &mut S, answer: &mut Answer) {
+    if answer.code == 204 || answer.code == 304 || (100..200).contains(&answer.code) {
+        answer.body.clear();
+        return;
+    }
+    let want = answer.header("content-length").and_then(|v| v.parse::<usize>().ok());
+    let mut chunk = [0u8; 4096];
+    loop {
+        if want.is_some_and(|w| answer.body.len() >= w) || answer.body.len() >= MAX_BODY {
+            break;
+        }
+        match s.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => answer.body.extend_from_slice(&chunk[..n]),
+        }
+    }
+    if let Some(w) = want {
+        answer.body.truncate(w);
+    }
+}
+
+/// A chunked body's data (what is malformed ends it).
+fn dechunk(mut raw: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    while let Some(eol) = raw.windows(2).position(|w| w == b"\r\n") {
+        let size = std::str::from_utf8(&raw[..eol])
+            .ok()
+            .and_then(|l| usize::from_str_radix(l.split(';').next().unwrap_or("").trim(), 16).ok());
+        let Some(size) = size.filter(|n| *n > 0) else { break };
+        raw = &raw[eol + 2..];
+        out.extend_from_slice(&raw[..size.min(raw.len())]);
+        if raw.len() < size + 2 {
+            break;
+        }
+        raw = &raw[size + 2..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -199,5 +273,47 @@ mod tests {
         assert!(Endpoint::parse("ftp://hooks.example.com/x").is_err());
         assert!(Endpoint::parse("hooks.example.com/x").is_err());
         assert!(Endpoint::parse("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod answers {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// A server answering one request with `reply`, then closing.
+    fn once(reply: &'static [u8]) -> Endpoint {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/x", l.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = c.read(&mut buf);
+            c.write_all(reply).unwrap();
+        });
+        Endpoint::parse(&url).unwrap()
+    }
+
+    fn post_to(e: &Endpoint) -> Answer {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(post(e, &[], b"{}", Duration::from_secs(5))).unwrap()
+    }
+
+    /// The reply's headers and body reach the caller, however it is framed.
+    #[test]
+    fn the_whole_answer_is_read() {
+        let a = post_to(&once(b"HTTP/1.1 202 Accepted\r\nContent-Length: 27\r\nX-Bug-Session: s1\r\n\r\n{\"ok\":true,\"session\":\"s1\"}"));
+        assert_eq!(
+            (a.code, a.header("x-bug-session"), a.body.as_slice()),
+            (202, Some("s1"), &b"{\"ok\":true,\"session\":\"s1\"}"[..])
+        );
+        let a = post_to(&once(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n4\r\n:1}\n\r\n0\r\n\r\n"));
+        assert_eq!(a.body, b"{\"a\":1}\n");
+        let a = post_to(&once(b"HTTP/1.1 429 Too Many\r\nRetry-After: 7\r\n\r\nslow down"));
+        assert_eq!(
+            (a.code, a.retry_after(), a.body.as_slice()),
+            (429, Some(7), &b"slow down"[..]),
+            "until it closes"
+        );
     }
 }
