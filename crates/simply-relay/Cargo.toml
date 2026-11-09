@@ -15,8 +15,17 @@ rmcp = { version = "3.1.4", default-features = false, features = ["server"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+# rustls with ring and webpki roots: the TLS stack is built in-crate, so no
+# process-wide crypto provider has to be installed by the app.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+toml = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std"] }
+webpki-roots = "1"
 
 [dev-dependencies]
+rmcp = { version = "3.1.4", default-features = false, features = ["server", "client"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

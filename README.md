@@ -5,8 +5,8 @@ derives MCP tools, dispatch and typed clients, plus the undo/redo history it
 records operations into. Nothing in here knows about audio, music, or any one
 app.
 
-The repo is named after its main crate, `simply-api`. The other three crates
-are what that crate is built on.
+The repo is named after its main crate, `simply-api`. Three more crates are
+what that crate is built on; `simply-relay` stands on its own.
 
 ## Crates
 
@@ -16,6 +16,8 @@ are what that crate is built on.
 | `simply-api-macros` | `#[api_service]`: from one async trait, generates params structs, the MCP tool router, a `Caller` dispatcher, a `Remote{Trait}` client and a `Dyn{Trait}` alias |
 | `simply-history` | a generic undo/redo history tree: arena, MRU branches, undo/redo/goto, prune, serde, a journal |
 | `simply-op-macros` | `#[derive(Op)]`: read-vs-mutate classification and label templates for operation enums |
+| `simply-relay` | an app dials out to Lumina over a WebSocket and serves any rmcp 3.x `ServerHandler` there: pairing by code, a token file rotated on each connect, the member's consent switches enforced in the app, a local call log, and standard read-only diagnostics. It does not depend on `simply-api`. Apps compile it in behind their own optional `lumina` feature |
+| `relay-compat` | dev only, never published: tests that Lumina's rmcp 1.3 client and the apps' rmcp 3.x servers talk over the relay |
 
 A consumer depends on `simply-api` alone and gets the other three through it,
 or on `simply-history` + `simply-op-macros` alone for an undo tree with no API.

@@ -102,8 +102,13 @@ async fn an_rmcp_1_3_client_drives_an_rmcp_3_server_over_the_websocket() {
         );
         assert!(info.capabilities.tools.is_some(), "the server offers tools");
 
-        let mut names: Vec<String> =
-            client.list_all_tools().await.expect("tools/list").into_iter().map(|t| t.name.into()).collect();
+        let mut names: Vec<String> = client
+            .list_all_tools()
+            .await
+            .expect("tools/list")
+            .into_iter()
+            .map(|t| t.name.into())
+            .collect();
         names.sort();
         assert_eq!(names, ["echo", "levels"]);
 
@@ -137,4 +142,74 @@ async fn an_rmcp_1_3_client_drives_an_rmcp_3_server_over_the_websocket() {
             .expect("the app notices the socket closed")
             .expect("the app task finishes");
     }
+}
+
+/// The whole relay (handshake, rotated token, gate, diagnostics) against
+/// Lumina's rmcp 1.3 client: what the listener in phase 2 must do, written
+/// out.
+#[tokio::test]
+async fn the_full_relay_serves_lumina_s_rmcp_1_3_client() {
+    use futures::{SinkExt, StreamExt};
+    use simply_relay::wire::{AppFrame, Auth, LuminaFrame, Welcome};
+
+    let dir = tempfile::tempdir().expect("a scratch dir");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("ws://{}/devices/v1", listener.local_addr().expect("addr"));
+    let relay = simply_relay::Relay::builder("demo", "0.1.0", dir.path())
+        .endpoint(url)
+        .read_only(["levels"])
+        .spawn(|| McpApiServer::new(Arc::new(Demo), demo_api_tool_router::<Demo>()))
+        .expect("the relay starts");
+    relay.set_read_only(true).expect("switch on");
+    let pairing = tokio::spawn({
+        let relay = relay.clone();
+        async move { relay.pair("CODE").await }
+    });
+
+    // Lumina: accept, read the hello, answer a welcome, then speak MCP.
+    let (tcp, _) = listener.accept().await.expect("a device connects");
+    let ws = tokio_tungstenite::accept_async(tcp).await.expect("upgrade");
+    let (mut sink, mut stream) =
+        simply_relay::frames::json_frames::<_, LuminaFrame, AppFrame>(ws, None);
+    let Some(AppFrame::Hello(hello)) = stream.next().await else { panic!("a hello first") };
+    assert_eq!(hello.auth, Auth::Pair { pair: "CODE".into() });
+    assert!(hello.consent.read_only);
+    sink.send(LuminaFrame::Welcome(Welcome {
+        device_id: "d-1".into(),
+        token: "t-1".into(),
+        member: None,
+    }))
+    .await
+    .expect("welcome");
+    let client = ()
+        .serve((
+            sink.retype::<rmcp13::model::ClientJsonRpcMessage>(),
+            stream.retype::<rmcp13::model::ServerJsonRpcMessage>(),
+        ))
+        .await
+        .expect("initialize");
+    pairing.await.expect("join").expect("paired");
+
+    let mut names: Vec<String> =
+        client.list_all_tools().await.expect("list").into_iter().map(|t| t.name.into()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["levels", "lumina_about", "lumina_config", "lumina_errors", "lumina_log", "lumina_report"],
+        "echo was not declared, so it is not offered"
+    );
+    let report = client
+        .call_tool(rmcp13::model::CallToolRequestParams::new("lumina_report"))
+        .await
+        .expect("report");
+    let report = report.structured_content.expect("structured");
+    assert_eq!(report["checks"]["levels"]["rate"], 48000);
+    let refused = client
+        .call_tool(rmcp13::model::CallToolRequestParams::new("echo"))
+        .await
+        .expect_err("echo is refused");
+    assert!(refused.to_string().contains("does not offer echo"), "{refused}");
+
+    client.cancel().await.expect("stop");
+    relay.shutdown().await;
 }
