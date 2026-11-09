@@ -5,13 +5,15 @@ What got added, per landing — dated with a clock and the jj change id
 
 ## Unreleased
 
-#### `simply-hooks`: signed outbound webhooks · 2026-11-09 10:05 · wnxonwuo, yzloxkmn, sqlzlqtw
+#### `simply-hooks`: signed outbound webhooks · 2026-11-09 10:15 · wnxonwuo, yzloxkmn, sqlzlqtw, lzmurqlqktsn
 
 - New crate **`simply-hooks`**. An app calls `emit(event, data)` and it
   returns at once; a worker thread POSTs
   `{"event", "at", "data"}` to every target that wants the event. Each
-  target has a URL, a secret and an optional event list (`jam.*` style
-  prefixes allowed). The app needs no async runtime.
+  target has a URL, an optional secret and an optional event list
+  (`jam.*` style prefixes allowed). A target without a secret
+  (`Target::unsigned`, for a public intake) gets no `X-Signature` and no
+  `X-Timestamp`. The app needs no async runtime.
 - Every request carries the headers Lumina's hooks listener verifies and
   simply.audio sends: `X-Signature: sha256=<hex HMAC-SHA256(secret,
   "<timestamp>.<body>")>`, `X-Timestamp` (unix seconds), `X-Hook-Delivery`
