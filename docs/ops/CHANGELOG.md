@@ -5,6 +5,30 @@ What got added, per landing — dated with a clock and the jj change id
 
 ## Unreleased
 
+#### `simply-hooks`: signed outbound webhooks · 2026-11-09 09:22 · wnxonwuo
+
+- New crate **`simply-hooks`**. An app calls `emit(event, data)` and it
+  returns at once; a worker thread POSTs
+  `{"event", "at", "data"}` to every target that wants the event. Each
+  target has a URL, a secret and an optional event list (`jam.*` style
+  prefixes allowed). The app needs no async runtime.
+- Every request carries `X-Simply-Event`, `X-Simply-Delivery` (a UUID v4),
+  `X-Simply-Timestamp` (unix seconds) and `X-Simply-Signature:
+  sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>`. A retry keeps
+  the delivery id and body and signs again. The crate docs hold a test
+  vector other repos can pin, and `sign::verify` for receivers.
+- Retries: 10 s doubling to 10 min, for a day; a 10 s timeout. A `2xx`
+  delivers; `408`, `425`, `429`, `5xx` and network errors retry; any other
+  answer is refused for good. `https://` only, except to localhost.
+- Pending deliveries are kept in one owner-only JSON file in the app's data
+  folder, so they survive a restart; it never holds a secret. Failures are
+  logged with the event, the delivery id and the host: never the body.
+- `status()` gives a settings screen what is pending, delivered and
+  dropped, and the last error, per target. `set_targets` applies changed
+  settings while the app runs.
+- Nothing is added to the lockfile: the HTTP client is one POST over
+  tokio and rustls, which the workspace already built.
+
 #### `simply-relay`: an app can link itself to Lumina · 2026-11-09 08:35 · vmlmllrk..ouppwpny
 
 - New crate **`simply-relay`**. An app (tussen, flux) opens a WebSocket out to
