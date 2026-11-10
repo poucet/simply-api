@@ -17,7 +17,7 @@ use crate::sign;
 use crate::{Config, Status, Target, TargetStatus};
 
 pub(crate) enum Msg {
-    Emit { event: String, body: String, created: u64 },
+    Emit { event: String, body: String, created: u64, seq: Option<String> },
     Targets(Vec<Target>),
 }
 
@@ -75,6 +75,9 @@ struct Worker {
     shared: Arc<Shared>,
     /// Per URL: delivered, refused or expired counts and the last outcome.
     seen: BTreeMap<String, TargetStatus>,
+    /// Sequences given up on, per URL and name, with when (unix ms): what
+    /// is emitted in one later is dropped. Forgotten after the max age.
+    closed: BTreeMap<(String, String), u64>,
 }
 
 pub(crate) fn spawn(
@@ -85,7 +88,14 @@ pub(crate) fn spawn(
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     std::thread::Builder::new().name("simply-hooks".into()).spawn(move || {
         let outbox = Outbox::open(config.outbox.clone());
-        let mut w = Worker { config, targets: vec![], outbox, shared, seen: BTreeMap::new() };
+        let mut w = Worker {
+            config,
+            targets: vec![],
+            outbox,
+            shared,
+            seen: BTreeMap::new(),
+            closed: BTreeMap::new(),
+        };
         let targets = std::mem::take(&mut w.config.targets);
         w.set_targets(targets);
         rt.block_on(w.run(rx));
@@ -119,8 +129,17 @@ impl Worker {
 
     fn take(&mut self, msg: Msg) {
         match msg {
-            Msg::Emit { event, body, created } => {
+            Msg::Emit { event, body, created, seq } => {
                 for (t, _) in self.targets.iter().filter(|(t, e)| e.is_some() && t.allows(&event)) {
+                    // A sequence given up on takes nothing more: never queued, as
+                    // a body over the limit isn't, so not counted as dropped.
+                    if seq
+                        .as_ref()
+                        .is_some_and(|s| self.closed.contains_key(&(t.url.clone(), s.clone())))
+                    {
+                        tracing::warn!("webhooks: {event} not sent: an earlier delivery in its sequence was given up on");
+                        continue;
+                    }
                     self.outbox.entries.push(Entry {
                         id: uuid::Uuid::new_v4().to_string(),
                         event: event.clone(),
@@ -129,12 +148,18 @@ impl Worker {
                         created,
                         attempts: 0,
                         next_ms: 0,
+                        seq: seq.clone(),
                     });
                 }
                 let over = self.outbox.entries.len().saturating_sub(self.config.max_pending);
                 if over > 0 {
                     tracing::warn!("webhooks: outbox full, dropping the {over} oldest deliveries");
-                    self.outbox.entries.drain(..over);
+                    let dropped: Vec<Entry> = self.outbox.entries.drain(..over).collect();
+                    let now = now_ms();
+                    for e in &dropped {
+                        self.give_up(e, now);
+                    }
+                    self.drop_closed();
                 }
             }
             Msg::Targets(targets) => self.set_targets(targets),
@@ -176,6 +201,7 @@ impl Worker {
         self.outbox.entries = keep;
         for e in old {
             changed = true;
+            self.give_up(&e, now);
             tracing::warn!(
                 "webhooks: gave up on {} delivery {} after {} attempts: older than {} s",
                 e.event,
@@ -185,8 +211,13 @@ impl Worker {
             );
             self.status_of(&e.url).dropped += 1;
         }
+        // Before anything is tried: what waited on an entry given up on goes too.
+        changed |= self.drop_closed();
         let mut set = JoinSet::new();
-        for (i, e) in self.outbox.entries.iter().enumerate().filter(|(_, e)| e.next_ms <= now) {
+        let ready = self.outbox.ready();
+        for (i, e) in
+            self.outbox.entries.iter().enumerate().filter(|(i, e)| ready[*i] && e.next_ms <= now)
+        {
             let Some((target, Some(endpoint))) = self.targets.iter().find(|(t, _)| t.url == e.url)
             else {
                 continue;
@@ -230,6 +261,8 @@ impl Worker {
                 }
                 Outcome::Refused(code, why) => {
                     done.push(i);
+                    let e = self.outbox.entries[i].clone();
+                    self.give_up(&e, now_ms());
                     let why = why.map(|w| format!(" ({w})")).unwrap_or_default();
                     tracing::warn!(
                         "webhooks: {host} refused {event} delivery {id} (HTTP {code}{why}): dropped"
@@ -257,9 +290,39 @@ impl Worker {
         for i in done.into_iter().rev() {
             self.outbox.entries.remove(i);
         }
+        changed |= self.drop_closed();
+        let max_age_ms = self.config.retry.max_age.as_millis() as u64;
+        self.closed.retain(|_, at| now.saturating_sub(*at) <= max_age_ms);
         if changed {
             self.outbox.save();
         }
+    }
+
+    /// `e` was given up on: so is its sequence, if it is in one.
+    fn give_up(&mut self, e: &Entry, now: u64) {
+        if let Some((url, seq)) = e.chain() {
+            self.closed.insert((url.to_owned(), seq.to_owned()), now);
+        }
+    }
+
+    /// Drop what is left of the sequences given up on, each counted as
+    /// dropped: whether any was.
+    fn drop_closed(&mut self) -> bool {
+        let (gone, keep): (Vec<Entry>, Vec<Entry>) =
+            std::mem::take(&mut self.outbox.entries).into_iter().partition(|e| {
+                e.chain()
+                    .is_some_and(|(u, s)| self.closed.contains_key(&(u.to_owned(), s.to_owned())))
+            });
+        self.outbox.entries = keep;
+        for e in &gone {
+            tracing::warn!(
+                "webhooks: {} delivery {} dropped: an earlier delivery in its sequence was given up on",
+                e.event,
+                e.id
+            );
+            self.status_of(&e.url).dropped += 1;
+        }
+        !gone.is_empty()
     }
 
     fn status_of(&mut self, url: &str) -> &mut TargetStatus {

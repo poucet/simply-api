@@ -362,3 +362,87 @@ fn an_unsigned_target_gets_no_signature_but_its_delivery_id() {
     assert_eq!(got[0].header("x-hook-delivery").len(), 36);
     check_signed(&signed.wait_for(1)[0], "k");
 }
+
+fn events(got: &[Got]) -> Vec<String> {
+    got.iter().map(|g| g.header("x-hook-event").to_owned()).collect()
+}
+
+#[test]
+fn a_sequence_is_delivered_in_order_and_holds_up_nothing_else() {
+    let rx = Receiver::start([Answer::Status(503), Answer::Status(503)]);
+    let hooks = Hooks::new(config(None).target(Target::new(&rx.url, "k"))).unwrap();
+    hooks.emit_in("s1", "jam.shared", serde_json::json!({ "session": "s1" }));
+    hooks.emit_in("s1", "jam.ended", serde_json::json!({ "session": "s1" }));
+    // The first attempt failed: what is in no sequence goes meanwhile.
+    rx.wait_for(1);
+    hooks.emit("app.started", serde_json::json!({}));
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    let got = events(&rx.got());
+    let shared_ok = got.iter().rposition(|e| e == "jam.shared").unwrap();
+    let ended = got.iter().position(|e| e == "jam.ended").unwrap();
+    assert!(shared_ok < ended, "jam.ended only after jam.shared went: {got:?}");
+    let other = got.iter().position(|e| e == "app.started").unwrap();
+    assert!(other < shared_ok, "app.started didn't wait on the sequence: {got:?}");
+    assert_eq!(got.iter().filter(|e| *e == "jam.ended").count(), 1, "{got:?}");
+    let s = &hooks.status().targets[0];
+    assert_eq!((s.delivered, s.dropped), (3, 0));
+}
+
+#[test]
+fn a_sequence_given_up_on_sends_nothing_more() {
+    let rx = Receiver::start([Answer::Status(401)]);
+    let hooks = Hooks::new(config(None).target(Target::new(&rx.url, "k"))).unwrap();
+    hooks.emit_in("s1", "jam.shared", serde_json::json!({}));
+    hooks.emit_in("s1", "jam.ended", serde_json::json!({}));
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    // Emitted in it later: dropped too. Another sequence is untouched.
+    hooks.emit_in("s1", "jam.ended", serde_json::json!({}));
+    hooks.emit_in("s2", "jam.shared", serde_json::json!({}));
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(events(&rx.got()), ["jam.shared", "jam.shared"]);
+    let s = &hooks.status().targets[0];
+    assert_eq!((s.delivered, s.dropped), (1, 2), "the late one was never queued");
+}
+
+#[test]
+fn a_sequence_too_old_goes_whole() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/in", listener.local_addr().unwrap().port());
+    drop(listener);
+    let retry = Retry { max_age: Duration::from_secs(1), ..fast() };
+    let hooks = Hooks::new(config(None).retry(retry).target(Target::new(&url, "k"))).unwrap();
+    hooks.emit_in("s1", "jam.shared", serde_json::json!({}));
+    hooks.emit_in("s1", "jam.ended", serde_json::json!({}));
+    assert!(hooks.wait_idle(Duration::from_secs(10)), "given up on");
+    let s = &hooks.status().targets[0];
+    assert_eq!((s.delivered, s.dropped), (0, 2));
+}
+
+#[test]
+fn a_sequence_keeps_its_order_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let outbox = dir.path().join("hooks-outbox.json");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/in", listener.local_addr().unwrap().port());
+    drop(listener);
+    {
+        let hooks =
+            Hooks::new(config(Some(outbox.clone())).target(Target::new(&url, "k"))).unwrap();
+        hooks.emit_in("s1", "jam.shared", serde_json::json!({}));
+        hooks.emit_in("s1", "jam.ended", serde_json::json!({}));
+        let until = Instant::now() + Duration::from_secs(10);
+        while hooks.status().targets.first().is_none_or(|t| t.last_error.is_none()) {
+            assert!(Instant::now() < until, "an attempt failed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(hooks.status().pending, 2);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    // jam.ended was never tried, so it is due now; jam.shared only after its backoff.
+    let rx = Receiver::on(TcpListener::bind(url[7..].split('/').next().unwrap()).unwrap(), []);
+    let hooks = Hooks::new(config(Some(outbox)).target(Target::new(&url, "k"))).unwrap();
+    rx.wait_for(2);
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    assert_eq!(events(&rx.got()), ["jam.shared", "jam.ended"]);
+}

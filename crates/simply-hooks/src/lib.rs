@@ -69,6 +69,13 @@
 //!   Redirects are not followed and the answer's body is never read.
 //! - Failures are logged with the event, the delivery id and the target's
 //!   host: never the body, the URL's path or the secret.
+//! - Deliveries are independent and tried at once, unless emitted in a
+//!   **sequence** ([`Hooks::emit_in`]): to each target, a delivery waits
+//!   until the earlier ones in its sequence are delivered, across retries
+//!   and restarts, and one given up on (refused, too old, or pushed out of
+//!   a full outbox) takes the rest of its sequence with it, and what is
+//!   emitted in it later. For an event that only makes sense after another
+//!   (a `jam.ended` after its `jam.started`).
 //! - The outbox ([`Config::outbox`]) holds every delivery not yet made,
 //!   survives a restart, and loses a delivery once it is made, refused or
 //!   too old. It never holds a secret.
@@ -362,6 +369,20 @@ impl Hooks {
     /// at once. A name [`valid_event`] refuses, data that isn't JSON, or a
     /// body over [`Config::max_body`] is logged and dropped.
     pub fn emit(&self, event: &str, data: impl Serialize) {
+        self.queue(None, event, data);
+    }
+
+    /// As [`Hooks::emit`], in the sequence `seq` (any name, e.g. a session
+    /// id): to each target, it is not tried before every delivery emitted
+    /// earlier in `seq` is delivered, and it is dropped, never sent, if one
+    /// of them is given up on (refused for good, older than
+    /// [`Retry::max_age`], or pushed out of a full outbox). Order holds
+    /// across retries and restarts; other deliveries never wait on it.
+    pub fn emit_in(&self, seq: &str, event: &str, data: impl Serialize) {
+        self.queue(Some(seq.to_owned()), event, data);
+    }
+
+    fn queue(&self, seq: Option<String>, event: &str, data: impl Serialize) {
         if !valid_event(event) {
             tracing::warn!("webhooks: {event:?} is not an event name: not sent");
             return;
@@ -386,7 +407,7 @@ impl Hooks {
             return;
         }
         let created = now.timestamp().max(0) as u64;
-        self.send(worker::Msg::Emit { event: event.to_owned(), body, created });
+        self.send(worker::Msg::Emit { event: event.to_owned(), body, created, seq });
     }
 
     /// Replace the targets. Deliveries pending for a URL no longer among

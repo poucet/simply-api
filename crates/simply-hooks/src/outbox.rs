@@ -25,6 +25,17 @@ pub(crate) struct Entry {
     pub attempts: u32,
     /// Not before this, unix milliseconds.
     pub next_ms: u64,
+    /// The sequence it is in ([`crate::Hooks::emit_in`]): it waits for the
+    /// earlier entries to its URL in the same sequence. `None`: in none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<String>,
+}
+
+impl Entry {
+    /// What orders it: its URL and sequence (`None`: nothing does).
+    pub fn chain(&self) -> Option<(&str, &str)> {
+        self.seq.as_deref().map(|s| (self.url.as_str(), s))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,9 +67,16 @@ impl Outbox {
         }
     }
 
-    /// The earliest time an entry is due, unix ms.
+    /// Which entries may be tried: all but those waiting on an earlier
+    /// entry of their sequence, one per index.
+    pub fn ready(&self) -> Vec<bool> {
+        let mut heads = std::collections::BTreeSet::new();
+        self.entries.iter().map(|e| e.chain().is_none_or(|c| heads.insert(c))).collect()
+    }
+
+    /// The earliest time an entry that may be tried is due, unix ms.
     pub fn next_due(&self) -> Option<u64> {
-        self.entries.iter().map(|e| e.next_ms).min()
+        self.entries.iter().zip(self.ready()).filter(|(_, r)| *r).map(|(e, _)| e.next_ms).min()
     }
 }
 
@@ -124,6 +142,7 @@ mod tests {
             created: 1,
             attempts: 0,
             next_ms,
+            seq: None,
         }
     }
 
@@ -143,7 +162,36 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        let old = r#"{"v":1,"entries":[{"id":"a","event":"e","url":"u","body":"{}","created":1,"attempts":0,"next_ms":5}]}"#;
+        std::fs::write(&path, old).unwrap();
+        assert_eq!(
+            Outbox::open(Some(path.clone())).entries[0].seq,
+            None,
+            "an entry in no sequence reads as before"
+        );
         std::fs::write(&path, "not json").unwrap();
         assert!(Outbox::open(Some(path)).entries.is_empty(), "broken: starts empty");
+    }
+
+    #[test]
+    fn an_entry_waits_for_the_earlier_ones_of_its_sequence() {
+        let seq = |id: &str, url: &str, s: Option<&str>, next_ms| Entry {
+            url: url.into(),
+            seq: s.map(str::to_owned),
+            ..entry(id, next_ms)
+        };
+        let o = Outbox {
+            entries: vec![
+                seq("a", "https://x/", Some("s1"), 50),
+                seq("b", "https://x/", Some("s1"), 0),
+                seq("c", "https://x/", Some("s2"), 40),
+                seq("d", "https://y/", Some("s1"), 30),
+                seq("e", "https://x/", None, 60),
+                seq("f", "https://x/", None, 70),
+            ],
+            path: None,
+        };
+        assert_eq!(o.ready(), [true, false, true, true, true, true]);
+        assert_eq!(o.next_due(), Some(30), "b, due at 0, waits for a");
     }
 }

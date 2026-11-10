@@ -5,6 +5,18 @@ What got added, per landing — dated with a clock and the jj change id
 
 ## Unreleased
 
+#### `simply-hooks`: deliveries in sequence · 2026-11-10 10:51 · pvxrtnsn
+
+- `Hooks::emit_in(seq, event, data)` emits in a named sequence: to each
+  target, a delivery is not tried before the earlier ones in its sequence
+  are delivered, across retries and restarts; one given up on (refused,
+  too old, pushed out of a full outbox) drops the rest of its sequence and
+  anything emitted in it later. For an event that only makes sense after
+  another (`jam.ended` after its `jam.shared`). Other deliveries never wait
+  on a sequence, and `emit` behaves as before.
+- The outbox keeps a delivery's sequence; outboxes written before read as
+  they were.
+
 #### `simply-hooks`: linked devices · 2026-11-10 09:49 · nnnksosu
 
 - An app install can be **linked** to its member's account at a receiver
