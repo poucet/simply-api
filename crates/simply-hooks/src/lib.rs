@@ -21,12 +21,20 @@
 //! | `X-Signature` | signed targets only: `sha256=` + lowercase hex HMAC-SHA256(secret, `"<timestamp>.<raw body>"`) |
 //! | `X-Timestamp` | signed targets only: when this attempt was signed, unix seconds |
 //!
+//! | headers of its own | as the target lists them ([`Target::header`]), on every attempt |
+//!
 //! A target has a secret or not ([`Target::unsigned`]): a public intake
 //! (a receiver that keeps no secret for the sender) takes unsigned
 //! deliveries, which carry no `X-Signature` and no `X-Timestamp`.
 //!
 //! This is the scheme Lumina's hooks listener verifies and simply.audio
 //! sends.
+//!
+//! **A linked device** ([`device`]) signs the same way with its own key,
+//! plus `X-Hook-Device: <device id>`: [`Target::device`]. [`device::link`]
+//! swaps the one-time code a member was shown for that id and key,
+//! [`device::unlink`] tells the receiver to forget them, and [`keys`] keeps
+//! the key in the macOS keychain (the `keychain` feature).
 //!
 //! A retry sends the same body and delivery id (signed: with a fresh
 //! timestamp and signature), so a receiver deduplicates on `X-Hook-Delivery` and refuses
@@ -106,7 +114,9 @@ use std::time::{Duration, SystemTime};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
+pub mod device;
 mod http;
+pub mod keys;
 mod outbox;
 pub mod sign;
 mod worker;
@@ -133,7 +143,7 @@ impl std::fmt::Debug for Secret {
 }
 
 /// Where events go: a URL, the secret its signatures use (`None`: sent
-/// unsigned), and which events it wants.
+/// unsigned), which events it wants, and any headers of its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub url: String,
@@ -141,18 +151,41 @@ pub struct Target {
     /// `None`: every event. Otherwise each name exactly, or a prefix ending
     /// in `*` (`"jam.*"`).
     pub events: Option<Vec<String>>,
+    /// Sent on every attempt of every delivery to it, retries from the
+    /// outbox included ([`Target::header`]).
+    pub headers: Vec<(String, String)>,
 }
 
 impl Target {
     /// A target whose deliveries are signed with `secret`.
     pub fn new(url: impl Into<String>, secret: impl Into<String>) -> Target {
-        Target { url: url.into(), secret: Some(Secret::new(secret)), events: None }
+        Target { url: url.into(), secret: Some(Secret::new(secret)), events: None, headers: vec![] }
     }
 
     /// A target whose deliveries go unsigned: no `X-Signature`, no
     /// `X-Timestamp` (a public intake that keeps no secret for senders).
     pub fn unsigned(url: impl Into<String>) -> Target {
-        Target { url: url.into(), secret: None, events: None }
+        Target { url: url.into(), secret: None, events: None, headers: vec![] }
+    }
+
+    /// A target signed as a linked device ([`device`]): with the device's
+    /// key, plus `X-Hook-Device: <device id>` on every attempt.
+    pub fn device(url: impl Into<String>, device_id: impl Into<String>, key: &Secret) -> Target {
+        Target::new(url, key.expose()).header(device::DEVICE_HEADER, device_id)
+    }
+
+    /// Send `name: value` with every delivery to it. A name or value with
+    /// a line break (which would split the request) is never sent: it is
+    /// dropped here, with a warning.
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Target {
+        let (name, value) = (name.into(), value.into());
+        let token = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() && b != b':');
+        if !token(&name) || value.bytes().any(|b| b == b'\r' || b == b'\n') {
+            tracing::warn!("webhooks: header {name:?} is not one a request can carry: not sent");
+            return self;
+        }
+        self.headers.push((name, value));
+        self
     }
 
     /// Only these events (exact names, or prefixes ending in `*`).
@@ -415,6 +448,21 @@ mod tests {
         assert_eq!(r.after(2), Duration::from_secs(20));
         assert_eq!(r.after(7), Duration::from_secs(600));
         assert_eq!(r.after(200), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn a_header_that_would_split_the_request_is_never_kept() {
+        let t = Target::new("https://x", "s")
+            .header("X-Hook-Device", "abc")
+            .header("X-Bad", "a\r\nX-Evil: 1")
+            .header("Bad Name", "v")
+            .header("", "v");
+        assert_eq!(t.headers, [("X-Hook-Device".to_owned(), "abc".to_owned())]);
+        let d = Target::device("https://x", "0123", &Secret::new("k"));
+        assert_eq!(
+            (d.secret.as_ref().map(Secret::expose), d.headers.clone()),
+            (Some("k"), vec![("X-Hook-Device".to_owned(), "0123".to_owned())])
+        );
     }
 
     #[test]

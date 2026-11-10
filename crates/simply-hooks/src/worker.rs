@@ -36,8 +36,9 @@ enum Outcome {
     /// handed. Nothing reads it yet.
     #[allow(dead_code)]
     Delivered(Answer),
-    /// Refused for good: retrying won't change the answer.
-    Refused(u16),
+    /// Refused for good: retrying won't change the answer. With the
+    /// receiver's reason, when its answer is `{"error": "…"}`.
+    Refused(u16, Option<String>),
     /// Try again, not before the receiver's `Retry-After` (seconds).
     Failed(String, Option<u64>),
 }
@@ -48,7 +49,13 @@ fn classify(r: Result<Answer, String>) -> Outcome {
         Ok(a) if matches!(a.code, 408 | 425 | 429 | 500..=599) => {
             Outcome::Failed(format!("HTTP {}", a.code), a.retry_after())
         }
-        Ok(a) => Outcome::Refused(a.code),
+        Ok(a) => {
+            let why = serde_json::from_slice::<serde_json::Value>(&a.body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
+                .map(|e| e.chars().take(120).collect());
+            Outcome::Refused(a.code, why)
+        }
         Err(e) => Outcome::Failed(e, None),
     }
 }
@@ -186,17 +193,18 @@ impl Worker {
             };
             let ts = now / 1000;
             let mut headers = vec![
-                (sign::EVENT_HEADER, e.event.clone()),
-                (sign::DELIVERY_HEADER, e.id.clone()),
-                ("User-Agent", self.config.user_agent.clone()),
+                (sign::EVENT_HEADER.to_owned(), e.event.clone()),
+                (sign::DELIVERY_HEADER.to_owned(), e.id.clone()),
+                ("User-Agent".to_owned(), self.config.user_agent.clone()),
             ];
             if let Some(secret) = &target.secret {
-                headers.push((sign::TIMESTAMP_HEADER, ts.to_string()));
+                headers.push((sign::TIMESTAMP_HEADER.to_owned(), ts.to_string()));
                 headers.push((
-                    sign::SIGNATURE_HEADER,
+                    sign::SIGNATURE_HEADER.to_owned(),
                     sign::sign(secret.0.as_bytes(), ts, e.body.as_bytes()),
                 ));
             }
+            headers.extend(target.headers.iter().cloned());
             let (endpoint, body, timeout) = (endpoint.clone(), e.body.clone(), self.config.timeout);
             set.spawn(async move {
                 (i, http::post(&endpoint, &headers, body.as_bytes(), timeout).await)
@@ -220,14 +228,15 @@ impl Worker {
                     s.last_ok = Some(at);
                     s.last_error = None;
                 }
-                Outcome::Refused(code) => {
+                Outcome::Refused(code, why) => {
                     done.push(i);
+                    let why = why.map(|w| format!(" ({w})")).unwrap_or_default();
                     tracing::warn!(
-                        "webhooks: {host} refused {event} delivery {id} (HTTP {code}): dropped"
+                        "webhooks: {host} refused {event} delivery {id} (HTTP {code}{why}): dropped"
                     );
                     let s = self.status_of(&url);
                     s.dropped += 1;
-                    s.last_error = Some(format!("refused: HTTP {code}"));
+                    s.last_error = Some(format!("refused: HTTP {code}{why}"));
                     s.last_error_at = Some(at);
                 }
                 Outcome::Failed(why, retry_after) => {

@@ -113,7 +113,7 @@ impl Answer {
 /// answer's head: the answer, or why there is none.
 pub(crate) async fn post(
     to: &Endpoint,
-    headers: &[(&str, String)],
+    headers: &[(String, String)],
     body: &[u8],
     timeout: Duration,
 ) -> Result<Answer, String> {
@@ -125,7 +125,7 @@ pub(crate) async fn post(
 
 async fn exchange(
     to: &Endpoint,
-    headers: &[(&str, String)],
+    headers: &[(String, String)],
     body: &[u8],
 ) -> Result<Answer, String> {
     let tcp = TcpStream::connect((to.host.as_str(), to.port))
@@ -148,7 +148,7 @@ async fn exchange(
 async fn send<S: AsyncRead + AsyncWrite + Unpin>(
     mut s: S,
     to: &Endpoint,
-    headers: &[(&str, String)],
+    headers: &[(String, String)],
     body: &[u8],
 ) -> Result<Answer, String> {
     let mut head = format!(
