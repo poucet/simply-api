@@ -5,6 +5,25 @@ What got added, per landing — dated with a clock and the jj change id
 
 ## Unreleased
 
+#### `simply-hooks`: linked devices · 2026-11-10 09:49 · nnnksosu
+
+- An app install can be **linked** to its member's account at a receiver
+  (Lumina's `/<app> link`): `device::link(base, request, timeout)` swaps
+  the one-time code the member was shown (read in any case, dashes
+  dropped) for a device id and a key, at `POST /devices/v1/link`;
+  `device::unlink` tells the receiver to forget it, signed by the device.
+  A refusal says its status, the receiver's reason and its `Retry-After`.
+- `Target::device(url, device_id, key)` signs deliveries with the device's
+  key and adds `X-Hook-Device: <device id>` to every attempt, retries from
+  the outbox included. Any target may carry headers of its own
+  (`Target::header`); one with a line break is never sent.
+- The `keychain` feature keeps a device's key in the macOS keychain
+  (`keys::Keychain`); off macOS it keeps nothing and says so.
+  `keys::MemoryKeys` is for tests.
+- A delivery refused for good now says the receiver's reason in the
+  status (`refused: HTTP 401 (device not linked)`), not only its code.
+- The crate docs pin Lumina's device-signing test vector.
+
 #### `simply-hooks`: signed outbound webhooks · 2026-11-09 10:15 · wnxonwuo, yzloxkmn, sqlzlqtw, lzmurqlqktsn
 
 - New crate **`simply-hooks`**. An app calls `emit(event, data)` and it
