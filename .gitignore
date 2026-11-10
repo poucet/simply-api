@@ -3,5 +3,7 @@ target/
 docs/scratch/
 .claude/
 .pi/
-/SYSTEM.md
 .DS_Store
+/AGENTS.md
+/AGENTS.project.md
+/.pi/agents
