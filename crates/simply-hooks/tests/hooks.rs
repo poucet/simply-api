@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,30 +39,48 @@ enum Answer {
 }
 
 /// A receiver: answers from a script (then 200), records every request.
+/// One that is down closes each connection at once, unread and unrecorded:
+/// every attempt fails, as with nobody there, while the port stays this
+/// test's (a port let go to be bound again later can be taken meanwhile).
 #[derive(Clone)]
 struct Receiver {
     url: String,
     got: Arc<Mutex<Vec<Got>>>,
     script: Arc<Mutex<VecDeque<Answer>>>,
+    down: Arc<AtomicBool>,
 }
 
 impl Receiver {
     fn start(script: impl IntoIterator<Item = Answer>) -> Receiver {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        Receiver::on(listener, script)
+        Receiver::new(false, script)
     }
 
-    fn on(listener: TcpListener, script: impl IntoIterator<Item = Answer>) -> Receiver {
+    /// A receiver that is down until [`Receiver::up`].
+    fn down() -> Receiver {
+        Receiver::new(true, [])
+    }
+
+    fn up(&self) {
+        self.down.store(false, Ordering::SeqCst);
+    }
+
+    fn new(down: bool, script: impl IntoIterator<Item = Answer>) -> Receiver {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}/hooks/in", listener.local_addr().unwrap().port());
         let r = Receiver {
             url,
             got: Arc::default(),
             script: Arc::new(Mutex::new(script.into_iter().collect())),
+            down: Arc::new(AtomicBool::new(down)),
         };
         let me = r.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                if me.down.load(Ordering::SeqCst) {
+                    drop(stream);
+                    continue;
+                }
                 let me = me.clone();
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -209,10 +228,9 @@ fn a_refusal_is_not_retried() {
 fn the_outbox_outlives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let outbox = dir.path().join("hooks-outbox.json");
-    // A port nobody listens on yet.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/in", listener.local_addr().unwrap().port());
-    drop(listener);
+    // A receiver that is down: every attempt fails.
+    let rx = Receiver::down();
+    let url = rx.url.clone();
     {
         let hooks =
             Hooks::new(config(Some(outbox.clone())).target(Target::new(&url, "k"))).unwrap();
@@ -236,7 +254,7 @@ fn the_outbox_outlives_a_restart() {
         .to_owned();
 
     // The app starts again, the receiver is up.
-    let rx = Receiver::on(TcpListener::bind(url[7..].split('/').next().unwrap()).unwrap(), []);
+    rx.up();
     let hooks = Hooks::new(config(Some(outbox.clone())).target(Target::new(&url, "k"))).unwrap();
     let got = rx.wait_for(1);
     assert!(hooks.wait_idle(Duration::from_secs(10)));
@@ -417,9 +435,7 @@ fn a_sequence_given_up_on_sends_nothing_more() {
 
 #[test]
 fn a_sequence_too_old_goes_whole() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/in", listener.local_addr().unwrap().port());
-    drop(listener);
+    let url = Receiver::down().url;
     let retry = Retry { max_age: Duration::from_secs(1), ..fast() };
     let hooks = Hooks::new(config(None).retry(retry).target(Target::new(&url, "k"))).unwrap();
     hooks.emit_in("s1", "jam.shared", serde_json::json!({}));
@@ -433,24 +449,28 @@ fn a_sequence_too_old_goes_whole() {
 fn a_sequence_keeps_its_order_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let outbox = dir.path().join("hooks-outbox.json");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/in", listener.local_addr().unwrap().port());
-    drop(listener);
+    let rx = Receiver::down();
+    let url = rx.url.clone();
     {
         let hooks =
             Hooks::new(config(Some(outbox.clone())).target(Target::new(&url, "k"))).unwrap();
         hooks.emit_in("s1", "jam.shared", serde_json::json!({}));
         hooks.emit_in("s1", "jam.ended", serde_json::json!({}));
+        // The first attempt can fail before the worker has taken in
+        // jam.ended: wait for both.
         let until = Instant::now() + Duration::from_secs(10);
-        while hooks.status().targets.first().is_none_or(|t| t.last_error.is_none()) {
-            assert!(Instant::now() < until, "an attempt failed");
+        loop {
+            let s = hooks.status();
+            if s.pending == 2 && s.targets.first().is_some_and(|t| t.last_error.is_some()) {
+                break;
+            }
+            assert!(Instant::now() < until, "an attempt failed, both pending: {s:?}");
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(hooks.status().pending, 2);
     }
     std::thread::sleep(Duration::from_millis(200));
     // jam.ended was never tried, so it is due now; jam.shared only after its backoff.
-    let rx = Receiver::on(TcpListener::bind(url[7..].split('/').next().unwrap()).unwrap(), []);
+    rx.up();
     let hooks = Hooks::new(config(Some(outbox)).target(Target::new(&url, "k"))).unwrap();
     rx.wait_for(2);
     assert!(hooks.wait_idle(Duration::from_secs(10)));
@@ -510,9 +530,7 @@ fn each_event_reads_its_own_outcome() {
 fn a_pending_event_keeps_its_id_and_state_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let outbox = dir.path().join("hooks-outbox.json");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}/in", listener.local_addr().unwrap().port());
-    drop(listener);
+    let url = Receiver::down().url;
     let rx = Receiver::start([]);
     let (kept, done) = {
         let hooks = Hooks::new(
