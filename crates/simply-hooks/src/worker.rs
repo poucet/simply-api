@@ -14,10 +14,10 @@ use tokio::task::JoinSet;
 use crate::http::{self, Answer, Endpoint};
 use crate::outbox::{Entry, Outbox};
 use crate::sign;
-use crate::{Config, Status, Target, TargetStatus};
+use crate::{Config, Delivery, DeliveryState, DropReason, Status, Target, TargetStatus};
 
 pub(crate) enum Msg {
-    Emit { event: String, body: String, created: u64, seq: Option<String> },
+    Emit { id: String, event: String, body: String, created: u64, seq: Option<String> },
     Targets(Vec<Target>),
 }
 
@@ -27,6 +27,92 @@ pub(crate) struct Shared {
     pub status: Mutex<Status>,
     /// Messages sent and not yet taken in by the worker.
     pub queued: AtomicUsize,
+    /// Each event's deliveries ([`crate::Hooks::deliveries`]).
+    pub events: Mutex<Events>,
+}
+
+/// One event's deliveries, and when it ended (`None`: one is pending, or
+/// it is not routed yet), in the order events end.
+#[derive(Default)]
+pub(crate) struct Event {
+    pub deliveries: Vec<Delivery>,
+    ended: Option<u64>,
+}
+
+/// Every event emitted and not forgotten, by id.
+#[derive(Default)]
+pub(crate) struct Events {
+    map: BTreeMap<String, Event>,
+    /// How many events have ended: the next one's place.
+    ends: u64,
+}
+
+impl Events {
+    pub fn get(&self, id: &str) -> Option<&Event> {
+        self.map.get(id)
+    }
+
+    /// `emit` gave out `id`: known, not routed yet.
+    pub fn emitted(&mut self, id: &str) {
+        self.map.insert(id.to_owned(), Event::default());
+    }
+
+    pub fn forget(&mut self, id: &str) {
+        self.map.remove(id);
+    }
+
+    /// `id` went to these targets (possibly none).
+    fn routed(&mut self, id: &str, deliveries: Vec<Delivery>) {
+        self.map.entry(id.to_owned()).or_default().deliveries.extend(deliveries);
+        self.end_if_done(id);
+    }
+
+    /// A delivery of `event` now stands at `state`.
+    fn set(&mut self, event: Option<&str>, delivery: &str, state: DeliveryState) {
+        let Some(event) = event else { return };
+        let Some(e) = self.map.get_mut(event) else { return };
+        if let Some(d) = e.deliveries.iter_mut().find(|d| d.id == delivery) {
+            d.state = state;
+        }
+        self.end_if_done(event);
+    }
+
+    fn end_if_done(&mut self, id: &str) {
+        let Some(e) = self.map.get_mut(id) else { return };
+        if e.ended.is_none() && e.deliveries.iter().all(|d| !d.state.pending()) {
+            e.ended = Some(self.ends);
+            self.ends += 1;
+        }
+    }
+
+    /// Keep the newest `keep` events that ended, and every one that hasn't.
+    fn prune(&mut self, keep: usize) {
+        let ended = self.map.values().filter(|e| e.ended.is_some()).count();
+        if ended <= keep {
+            return;
+        }
+        let mut ends: Vec<u64> = self.map.values().filter_map(|e| e.ended).collect();
+        ends.sort_unstable();
+        let cut = ends[ended - keep];
+        self.map.retain(|_, e| e.ended.is_none_or(|n| n >= cut));
+    }
+}
+
+fn at_ms(ms: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_millis(ms)
+}
+
+/// A pending delivery's state, as its outbox entry says.
+fn pending_state(e: &Entry, ready: bool) -> DeliveryState {
+    DeliveryState::Pending {
+        attempts: e.attempts,
+        last_error: e.last_error.clone(),
+        next_try: ready.then(|| at_ms(e.next_ms)),
+    }
+}
+
+fn dropped(e: &Entry, reason: DropReason) -> DeliveryState {
+    DeliveryState::Dropped { at: SystemTime::now(), attempts: e.attempts, reason }
 }
 
 /// How one attempt ended.
@@ -75,9 +161,10 @@ struct Worker {
     shared: Arc<Shared>,
     /// Per URL: delivered, refused or expired counts and the last outcome.
     seen: BTreeMap<String, TargetStatus>,
-    /// Sequences given up on, per URL and name, with when (unix ms): what
-    /// is emitted in one later is dropped. Forgotten after the max age.
-    closed: BTreeMap<(String, String), u64>,
+    /// Sequences given up on, per URL and name, with when (unix ms) and
+    /// why: what is emitted in one later is dropped. Forgotten after the
+    /// max age.
+    closed: BTreeMap<(String, String), (u64, DropReason)>,
 }
 
 pub(crate) fn spawn(
@@ -96,6 +183,21 @@ pub(crate) fn spawn(
             seen: BTreeMap::new(),
             closed: BTreeMap::new(),
         };
+        // What is pending is known by its event across a restart.
+        {
+            let mut events = w.shared.events.lock().unwrap_or_else(|p| p.into_inner());
+            let ready = w.outbox.ready();
+            for (e, r) in w.outbox.entries.iter().zip(ready) {
+                if let Some(id) = &e.event_id {
+                    let d = Delivery {
+                        url: e.url.clone(),
+                        id: e.id.clone(),
+                        state: pending_state(e, r),
+                    };
+                    events.routed(id, vec![d]);
+                }
+            }
+        }
         let targets = std::mem::take(&mut w.config.targets);
         w.set_targets(targets);
         rt.block_on(w.run(rx));
@@ -114,11 +216,17 @@ impl Worker {
                 msg = rx.recv() => {
                     let Some(msg) = msg else { break };
                     self.take(msg);
+                    let mut taken = 1;
                     // Everything already sent, in one go: one write for a burst.
                     while let Ok(msg) = rx.try_recv() {
                         self.take(msg);
+                        taken += 1;
                     }
                     self.outbox.save();
+                    // Taken in only once the status shows it: `wait_idle`
+                    // never sees an emit neither queued nor pending.
+                    self.publish();
+                    self.shared.queued.fetch_sub(taken, Ordering::SeqCst);
                 }
                 _ = tokio::time::sleep(wait) => {}
             }
@@ -129,19 +237,24 @@ impl Worker {
 
     fn take(&mut self, msg: Msg) {
         match msg {
-            Msg::Emit { event, body, created, seq } => {
+            Msg::Emit { id: event_id, event, body, created, seq } => {
+                let mut routed = vec![];
                 for (t, _) in self.targets.iter().filter(|(t, e)| e.is_some() && t.allows(&event)) {
+                    let id = uuid::Uuid::new_v4().to_string();
                     // A sequence given up on takes nothing more: never queued, as
                     // a body over the limit isn't, so not counted as dropped.
-                    if seq
-                        .as_ref()
-                        .is_some_and(|s| self.closed.contains_key(&(t.url.clone(), s.clone())))
-                    {
+                    let closed =
+                        seq.as_ref().and_then(|s| self.closed.get(&(t.url.clone(), s.clone())));
+                    if let Some((_, cause)) = closed {
                         tracing::warn!("webhooks: {event} not sent: an earlier delivery in its sequence was given up on");
+                        let reason = DropReason::Sequence { cause: Box::new(cause.clone()) };
+                        let state =
+                            DeliveryState::Dropped { at: SystemTime::now(), attempts: 0, reason };
+                        routed.push(Delivery { url: t.url.clone(), id, state });
                         continue;
                     }
-                    self.outbox.entries.push(Entry {
-                        id: uuid::Uuid::new_v4().to_string(),
+                    let entry = Entry {
+                        id,
                         event: event.clone(),
                         url: t.url.clone(),
                         body: body.clone(),
@@ -149,22 +262,27 @@ impl Worker {
                         attempts: 0,
                         next_ms: 0,
                         seq: seq.clone(),
-                    });
+                        event_id: Some(event_id.clone()),
+                        last_error: None,
+                    };
+                    let state = pending_state(&entry, false);
+                    routed.push(Delivery { url: entry.url.clone(), id: entry.id.clone(), state });
+                    self.outbox.entries.push(entry);
                 }
+                self.events().routed(&event_id, routed);
                 let over = self.outbox.entries.len().saturating_sub(self.config.max_pending);
                 if over > 0 {
                     tracing::warn!("webhooks: outbox full, dropping the {over} oldest deliveries");
                     let dropped: Vec<Entry> = self.outbox.entries.drain(..over).collect();
                     let now = now_ms();
                     for e in &dropped {
-                        self.give_up(e, now);
+                        self.give_up(e, now, DropReason::Evicted);
                     }
                     self.drop_closed();
                 }
             }
             Msg::Targets(targets) => self.set_targets(targets),
         }
-        self.shared.queued.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Take `targets`; deliveries to a URL no longer among them are dropped.
@@ -178,12 +296,17 @@ impl Worker {
                 (t, e)
             })
             .collect();
-        let before = self.outbox.entries.len();
         let targets = &self.targets;
-        self.outbox
-            .entries
-            .retain(|e| targets.iter().any(|(t, ok)| ok.is_some() && t.url == e.url));
-        if self.outbox.entries.len() != before {
+        let (keep, gone): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut self.outbox.entries)
+            .into_iter()
+            .partition(|e| targets.iter().any(|(t, ok)| ok.is_some() && t.url == e.url));
+        self.outbox.entries = keep;
+        if !gone.is_empty() {
+            let mut events = self.events();
+            for e in &gone {
+                events.set(e.event_id.as_deref(), &e.id, dropped(e, DropReason::TargetRemoved));
+            }
+            drop(events);
             self.outbox.save();
         }
         self.seen.retain(|url, _| targets.iter().any(|(t, _)| &t.url == url));
@@ -201,7 +324,8 @@ impl Worker {
         self.outbox.entries = keep;
         for e in old {
             changed = true;
-            self.give_up(&e, now);
+            self.give_up(&e, now, DropReason::Expired);
+            self.events().set(e.event_id.as_deref(), &e.id, dropped(&e, DropReason::Expired));
             tracing::warn!(
                 "webhooks: gave up on {} delivery {} after {} attempts: older than {} s",
                 e.event,
@@ -251,9 +375,12 @@ impl Worker {
             let host = Endpoint::parse(&e.url).map(|p| p.host().to_owned()).unwrap_or_default();
             let (event, id, url, attempts) =
                 (e.event.clone(), e.id.clone(), e.url.clone(), e.attempts);
+            let event_id = e.event_id.clone();
             match classify(r) {
                 Outcome::Delivered(_) => {
                     done.push(i);
+                    let state = DeliveryState::Delivered { at, attempts };
+                    self.events().set(event_id.as_deref(), &id, state);
                     let s = self.status_of(&url);
                     s.delivered += 1;
                     s.last_ok = Some(at);
@@ -262,7 +389,9 @@ impl Worker {
                 Outcome::Refused(code, why) => {
                     done.push(i);
                     let e = self.outbox.entries[i].clone();
-                    self.give_up(&e, now_ms());
+                    let reason = DropReason::Refused { status: code, error: why.clone() };
+                    self.give_up(&e, now_ms(), reason.clone());
+                    self.events().set(event_id.as_deref(), &id, dropped(&e, reason));
                     let why = why.map(|w| format!(" ({w})")).unwrap_or_default();
                     tracing::warn!(
                         "webhooks: {host} refused {event} delivery {id} (HTTP {code}{why}): dropped"
@@ -276,6 +405,7 @@ impl Worker {
                     let asked = Duration::from_secs(retry_after.unwrap_or(0).min(MAX_RETRY_AFTER));
                     let delay = self.config.retry.after(attempts).max(asked);
                     self.outbox.entries[i].next_ms = now_ms() + delay.as_millis() as u64;
+                    self.outbox.entries[i].last_error = Some(why.clone());
                     tracing::warn!(
                         "webhooks: {event} delivery {id} to {host} failed (attempt {attempts}): {why}; again in {} s",
                         delay.as_secs()
@@ -292,17 +422,22 @@ impl Worker {
         }
         changed |= self.drop_closed();
         let max_age_ms = self.config.retry.max_age.as_millis() as u64;
-        self.closed.retain(|_, at| now.saturating_sub(*at) <= max_age_ms);
+        self.closed.retain(|_, (at, _)| now.saturating_sub(*at) <= max_age_ms);
         if changed {
             self.outbox.save();
         }
     }
 
-    /// `e` was given up on: so is its sequence, if it is in one.
-    fn give_up(&mut self, e: &Entry, now: u64) {
+    /// `e` was given up on, for `why`: so is its sequence, if it is in one
+    /// (for the first such reason).
+    fn give_up(&mut self, e: &Entry, now: u64, why: DropReason) {
         if let Some((url, seq)) = e.chain() {
-            self.closed.insert((url.to_owned(), seq.to_owned()), now);
+            self.closed.entry((url.to_owned(), seq.to_owned())).or_insert((now, why));
         }
+    }
+
+    fn events(&self) -> std::sync::MutexGuard<'_, Events> {
+        self.shared.events.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Drop what is left of the sequences given up on, each counted as
@@ -320,6 +455,12 @@ impl Worker {
                 e.event,
                 e.id
             );
+            let cause = e
+                .chain()
+                .and_then(|(u, s)| self.closed.get(&(u.to_owned(), s.to_owned())))
+                .map_or(DropReason::Expired, |(_, why)| why.clone());
+            let reason = DropReason::Sequence { cause: Box::new(cause) };
+            self.events().set(e.event_id.as_deref(), &e.id, dropped(e, reason));
             self.status_of(&e.url).dropped += 1;
         }
         !gone.is_empty()
@@ -344,5 +485,10 @@ impl Worker {
         }
         let pending = self.outbox.entries.len();
         *self.shared.status.lock().unwrap_or_else(|p| p.into_inner()) = Status { pending, targets };
+        let mut events = self.events();
+        for (e, r) in self.outbox.entries.iter().zip(self.outbox.ready()) {
+            events.set(e.event_id.as_deref(), &e.id, pending_state(e, r));
+        }
+        events.prune(self.config.max_pending);
     }
 }

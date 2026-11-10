@@ -5,6 +5,26 @@ What got added, per landing — dated with a clock and the jj change id
 
 ## Unreleased
 
+#### `simply-hooks`: each event's own outcome · 2026-11-10 12:13 · uxnlvkmo
+
+- `emit` and `emit_in` return the event's `EventId` (`None` when the event
+  is refused at once: a bad name, data that isn't JSON, a body over the
+  limit). `Hooks::deliveries(id)` says what became of that event at each
+  target: pending (attempts, last failure, next try, or waiting on its
+  sequence), delivered, or dropped with the reason (refused with the
+  receiver's status and `{"error"}`, too old, pushed out of a full outbox,
+  its target removed, or an earlier delivery in its sequence given up on,
+  with that one's reason). A UI shows each event's own result instead of
+  reading a target's totals, which a later refusal changes for every
+  event.
+- A delivery still in the outbox keeps its event id across a restart. The
+  outcomes of the newest `max_pending` events that ended are kept while
+  the app runs; one that ended before a restart reads as unknown (`None`).
+- The outbox keeps each delivery's event id and last failure; outboxes
+  written before read as they were.
+- `wait_idle` no longer returns between an emit being taken in and the
+  status showing it pending.
+
 #### `simply-hooks`: deliveries in sequence · 2026-11-10 10:51 · pvxrtnsn
 
 - `Hooks::emit_in(seq, event, data)` emits in a named sequence: to each

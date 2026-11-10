@@ -29,6 +29,14 @@ pub(crate) struct Entry {
     /// earlier entries to its URL in the same sequence. `None`: in none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<String>,
+    /// The event it delivers ([`crate::EventId`]): what
+    /// [`crate::Hooks::deliveries`] finds it by, after a restart too.
+    /// `None`: written before events had ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    /// Why the last attempt failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 impl Entry {
@@ -143,6 +151,8 @@ mod tests {
             attempts: 0,
             next_ms,
             seq: None,
+            event_id: None,
+            last_error: None,
         }
     }
 
@@ -165,8 +175,11 @@ mod tests {
         let old = r#"{"v":1,"entries":[{"id":"a","event":"e","url":"u","body":"{}","created":1,"attempts":0,"next_ms":5}]}"#;
         std::fs::write(&path, old).unwrap();
         assert_eq!(
-            Outbox::open(Some(path.clone())).entries[0].seq,
-            None,
+            (
+                Outbox::open(Some(path.clone())).entries[0].seq.clone(),
+                Outbox::open(Some(path.clone())).entries[0].event_id.clone()
+            ),
+            (None, None),
             "an entry in no sequence reads as before"
         );
         std::fs::write(&path, "not json").unwrap();

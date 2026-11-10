@@ -79,6 +79,13 @@
 //! - The outbox ([`Config::outbox`]) holds every delivery not yet made,
 //!   survives a restart, and loses a delivery once it is made, refused or
 //!   too old. It never holds a secret.
+//! - **Each event's own outcome**: `emit` and `emit_in` hand back the
+//!   event's [`EventId`], and [`Hooks::deliveries`] says what became of it
+//!   at each target ([`DeliveryState`]: pending with its attempts and next
+//!   try, delivered, or dropped and why). A delivery still in the outbox
+//!   keeps its event id across a restart; the outcomes of the newest
+//!   [`Config::max_pending`] events that ended are kept while the app
+//!   runs, and none from before a restart.
 //!
 //! # Adopting it
 //!
@@ -93,7 +100,8 @@
 //! ```
 //!
 //! Settings that change while the app runs go to [`Hooks::set_targets`];
-//! a UI reads [`Hooks::status`].
+//! a UI reads [`Hooks::status`] for every target's totals, and
+//! [`Hooks::deliveries`] for one event's outcome.
 //!
 //! # Room for a pull mode
 //!
@@ -118,7 +126,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 pub mod device;
@@ -328,6 +336,98 @@ pub struct TargetStatus {
     pub last_error_at: Option<SystemTime>,
 }
 
+/// An emitted event, as [`Hooks::deliveries`] reads it back: a UUID v4,
+/// given at `emit`. An app that must find it after a restart keeps it
+/// ([`EventId::as_str`], or serde, as a string).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventId(String);
+
+impl EventId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for EventId {
+    fn from(s: String) -> EventId {
+        EventId(s)
+    }
+}
+
+impl std::fmt::Display for EventId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One event's delivery to one target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delivery {
+    /// The target's URL.
+    pub url: String,
+    /// Its `X-Hook-Delivery`.
+    pub id: String,
+    pub state: DeliveryState,
+}
+
+/// Where a delivery stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeliveryState {
+    /// In the outbox: the attempts made, the last one's failure, and when
+    /// the next is due (`None`: when an earlier delivery in its sequence
+    /// is delivered).
+    Pending { attempts: u32, last_error: Option<String>, next_try: Option<SystemTime> },
+    /// The receiver took it (a `2xx`).
+    Delivered { at: SystemTime, attempts: u32 },
+    /// Given up on, for good.
+    Dropped { at: SystemTime, attempts: u32, reason: DropReason },
+}
+
+impl DeliveryState {
+    /// Still in the outbox.
+    pub fn pending(&self) -> bool {
+        matches!(self, DeliveryState::Pending { .. })
+    }
+}
+
+/// Why a delivery was given up on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DropReason {
+    /// The receiver refused it: its HTTP status, and its reason when the
+    /// answer was `{"error": "…"}`.
+    Refused { status: u16, error: Option<String> },
+    /// Older than [`Retry::max_age`] before it could be delivered.
+    Expired,
+    /// Pushed out of a full outbox ([`Config::max_pending`]).
+    Evicted,
+    /// An earlier delivery in its sequence ([`Hooks::emit_in`]) was given
+    /// up on, for `cause`: this one was never sent.
+    Sequence { cause: Box<DropReason> },
+    /// Its target was taken out of the settings ([`Hooks::set_targets`]).
+    TargetRemoved,
+}
+
+impl std::fmt::Display for DropReason {
+    /// What a person is told: `refused: HTTP 401 (unauthorized)`, …
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DropReason::Refused { status, error: Some(e) } => {
+                write!(f, "refused: HTTP {status} ({e})")
+            }
+            DropReason::Refused { status, error: None } => write!(f, "refused: HTTP {status}"),
+            DropReason::Expired => f.write_str("given up on: too old"),
+            DropReason::Evicted => f.write_str("given up on: the outbox was full"),
+            DropReason::Sequence { cause } => {
+                write!(f, "not sent: an earlier event in its sequence was {cause}")
+            }
+            DropReason::TargetRemoved => f.write_str("not sent: its target was removed"),
+        }
+    }
+}
+
 /// The envelope every body is.
 #[derive(Serialize)]
 struct Envelope<'a> {
@@ -366,10 +466,11 @@ impl Hooks {
     }
 
     /// Queue `event` with `data` for every target that wants it, and return
-    /// at once. A name [`valid_event`] refuses, data that isn't JSON, or a
-    /// body over [`Config::max_body`] is logged and dropped.
-    pub fn emit(&self, event: &str, data: impl Serialize) {
-        self.queue(None, event, data);
+    /// at once, with the id [`Hooks::deliveries`] reads its outcome by. A
+    /// name [`valid_event`] refuses, data that isn't JSON, or a body over
+    /// [`Config::max_body`] is logged and dropped: `None`.
+    pub fn emit(&self, event: &str, data: impl Serialize) -> Option<EventId> {
+        self.queue(None, event, data)
     }
 
     /// As [`Hooks::emit`], in the sequence `seq` (any name, e.g. a session
@@ -377,21 +478,33 @@ impl Hooks {
     /// earlier in `seq` is delivered, and it is dropped, never sent, if one
     /// of them is given up on (refused for good, older than
     /// [`Retry::max_age`], or pushed out of a full outbox). Order holds
-    /// across retries and restarts; other deliveries never wait on it.
-    pub fn emit_in(&self, seq: &str, event: &str, data: impl Serialize) {
-        self.queue(Some(seq.to_owned()), event, data);
+    /// across retries and restarts; other deliveries never wait on it. A
+    /// delivery dropped so reads [`DropReason::Sequence`].
+    pub fn emit_in(&self, seq: &str, event: &str, data: impl Serialize) -> Option<EventId> {
+        self.queue(Some(seq.to_owned()), event, data)
     }
 
-    fn queue(&self, seq: Option<String>, event: &str, data: impl Serialize) {
+    /// What became of the event `id` at each target that took it, as of
+    /// the worker's last step. `Some` and empty: not handed to a target
+    /// yet, or none wants it. `None`: not known here: emitted before a
+    /// restart and ended before it, older than the newest
+    /// [`Config::max_pending`] events that ended, or not this sender's. A
+    /// delivery still pending is always known, across restarts too.
+    pub fn deliveries(&self, id: &EventId) -> Option<Vec<Delivery>> {
+        let events = self.shared.events.lock().unwrap_or_else(|p| p.into_inner());
+        events.get(id.as_str()).map(|e| e.deliveries.clone())
+    }
+
+    fn queue(&self, seq: Option<String>, event: &str, data: impl Serialize) -> Option<EventId> {
         if !valid_event(event) {
             tracing::warn!("webhooks: {event:?} is not an event name: not sent");
-            return;
+            return None;
         }
         let data = match serde_json::to_value(data) {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!("webhooks: {event}'s data is not JSON ({e}): not sent");
-                return;
+                return None;
             }
         };
         let now = chrono::Utc::now();
@@ -404,10 +517,17 @@ impl Hooks {
                 body.len(),
                 self.max_body
             );
-            return;
+            return None;
         }
         let created = now.timestamp().max(0) as u64;
-        self.send(worker::Msg::Emit { event: event.to_owned(), body, created, seq });
+        let id = uuid::Uuid::new_v4().to_string();
+        self.shared.events.lock().unwrap_or_else(|p| p.into_inner()).emitted(&id);
+        let msg = worker::Msg::Emit { id: id.clone(), event: event.to_owned(), body, created, seq };
+        if !self.send(msg) {
+            self.shared.events.lock().unwrap_or_else(|p| p.into_inner()).forget(&id);
+            return None;
+        }
+        Some(EventId(id))
     }
 
     /// Replace the targets. Deliveries pending for a URL no longer among
@@ -437,12 +557,15 @@ impl Hooks {
         }
     }
 
-    fn send(&self, msg: worker::Msg) {
+    /// Whether the worker took it.
+    fn send(&self, msg: worker::Msg) -> bool {
         self.shared.queued.fetch_add(1, Ordering::SeqCst);
         if self.tx.send(msg).is_err() {
             self.shared.queued.fetch_sub(1, Ordering::SeqCst);
             tracing::warn!("webhooks: the worker has stopped: not sent");
+            return false;
         }
+        true
     }
 }
 

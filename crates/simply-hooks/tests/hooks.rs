@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use simply_hooks::{sign, Config, Hooks, Retry, Target};
+use simply_hooks::{sign, Config, DeliveryState, DropReason, EventId, Hooks, Retry, Target};
 
 /// One request as received.
 #[derive(Clone, Debug)]
@@ -33,6 +33,8 @@ enum Answer {
     RetryAfter(u16, u64),
     /// Read the request, never answer.
     Hang,
+    /// A status with `{"error": <reason>}`.
+    Refuse(u16, &'static str),
 }
 
 /// A receiver: answers from a script (then 200), records every request.
@@ -96,6 +98,14 @@ impl Receiver {
                             let _ = write!(stream, "HTTP/1.1 {code} X\r\nRetry-After: {secs}\r\nContent-Length: 0\r\n\r\n");
                         }
                         Answer::Hang => std::thread::sleep(Duration::from_secs(30)),
+                        Answer::Refuse(code, why) => {
+                            let body = format!("{{\"error\":\"{why}\"}}");
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 {code} X\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                        }
                     }
                 });
             }
@@ -445,4 +455,159 @@ fn a_sequence_keeps_its_order_across_a_restart() {
     rx.wait_for(2);
     assert!(hooks.wait_idle(Duration::from_secs(10)));
     assert_eq!(events(&rx.got()), ["jam.shared", "jam.ended"]);
+}
+
+/// The one delivery of `id`'s event, once it is no longer pending.
+fn ended(hooks: &Hooks, id: &EventId) -> DeliveryState {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let d = hooks.deliveries(id).expect("known");
+        if let [one] = d.as_slice() {
+            if !one.state.pending() {
+                return one.state.clone();
+            }
+        }
+        assert!(Instant::now() < until, "still pending: {d:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn each_event_reads_its_own_outcome() {
+    let rx = Receiver::start([Answer::Status(200), Answer::Refuse(401, "unauthorized")]);
+    let hooks = Hooks::new(config(None).target(Target::new(&rx.url, "k"))).unwrap();
+    let first = hooks.emit("jam.shared", serde_json::json!({ "n": 1 })).unwrap();
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    let second = hooks.emit("jam.shared", serde_json::json!({ "n": 2 })).unwrap();
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    let got = rx.wait_for(2);
+    assert!(matches!(ended(&hooks, &first), DeliveryState::Delivered { attempts: 1, .. }));
+    let d = &hooks.deliveries(&first).unwrap()[0];
+    assert_eq!(
+        (d.url.as_str(), d.id.as_str()),
+        (rx.url.as_str(), got[0].header("x-hook-delivery"))
+    );
+    match ended(&hooks, &second) {
+        DeliveryState::Dropped { reason, attempts: 1, .. } => {
+            assert_eq!(
+                reason,
+                DropReason::Refused { status: 401, error: Some("unauthorized".into()) }
+            );
+            assert_eq!(reason.to_string(), "refused: HTTP 401 (unauthorized)");
+        }
+        other => panic!("{other:?}"),
+    }
+    // The first still reads delivered, though the target's last word is a refusal.
+    assert!(matches!(ended(&hooks, &first), DeliveryState::Delivered { .. }));
+    assert!(hooks.emit("Not An Event", serde_json::json!({})).is_none());
+    let none = Hooks::new(config(None)).unwrap();
+    let id = none.emit("app.started", serde_json::json!({})).unwrap();
+    assert!(none.wait_idle(Duration::from_secs(10)));
+    assert_eq!(none.deliveries(&id), Some(vec![]), "no target wanted it");
+}
+
+#[test]
+fn a_pending_event_keeps_its_id_and_state_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let outbox = dir.path().join("hooks-outbox.json");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}/in", listener.local_addr().unwrap().port());
+    drop(listener);
+    let rx = Receiver::start([]);
+    let (kept, done) = {
+        let hooks = Hooks::new(
+            config(Some(outbox.clone()))
+                .retry(Retry { first: Duration::from_secs(60), ..fast() })
+                .targets(vec![
+                    Target::new(&url, "k").events(["jam.*"]),
+                    Target::new(&rx.url, "k").events(["app.*"]),
+                ]),
+        )
+        .unwrap();
+        let id = hooks.emit("jam.shared", serde_json::json!({})).unwrap();
+        let done = hooks.emit("app.started", serde_json::json!({})).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let d = hooks.deliveries(&id).unwrap();
+            if let [one] = d.as_slice() {
+                if let DeliveryState::Pending {
+                    attempts: 1,
+                    last_error: Some(_),
+                    next_try: Some(_),
+                } = &one.state
+                {
+                    break;
+                }
+            }
+            assert!(Instant::now() < until, "{d:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(ended(&hooks, &done), DeliveryState::Delivered { .. }));
+        // What an app keeps of it.
+        (serde_json::to_string(&id).unwrap(), done)
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    let id: EventId = serde_json::from_str(&kept).unwrap();
+    let hooks = Hooks::new(
+        config(Some(outbox)).retry(Retry { first: Duration::from_secs(60), ..fast() }).targets(
+            vec![
+                Target::new(&url, "k").events(["jam.*"]),
+                Target::new(&rx.url, "k").events(["app.*"]),
+            ],
+        ),
+    )
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while hooks.deliveries(&id).is_none() {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    match &hooks.deliveries(&id).unwrap()[..] {
+        [d] => assert!(
+            matches!(&d.state, DeliveryState::Pending { attempts: 1, last_error: Some(_), .. }),
+            "{d:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(hooks.deliveries(&done), None, "ended before the restart: not known");
+}
+
+#[test]
+fn a_sequence_given_up_on_says_why_for_each_delivery() {
+    let rx = Receiver::start([Answer::Refuse(403, "not a member")]);
+    let hooks = Hooks::new(config(None).target(Target::new(&rx.url, "k"))).unwrap();
+    let head = hooks.emit_in("s1", "jam.shared", serde_json::json!({})).unwrap();
+    let rest = hooks.emit_in("s1", "jam.ended", serde_json::json!({})).unwrap();
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    let late = hooks.emit_in("s1", "jam.ended", serde_json::json!({})).unwrap();
+    assert!(hooks.wait_idle(Duration::from_secs(10)));
+    let refused = DropReason::Refused { status: 403, error: Some("not a member".into()) };
+    let after = DropReason::Sequence { cause: Box::new(refused.clone()) };
+    for (id, want) in [(&head, &refused), (&rest, &after), (&late, &after)] {
+        match ended(&hooks, id) {
+            DeliveryState::Dropped { reason, .. } => assert_eq!(&reason, want),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(
+        after.to_string(),
+        "not sent: an earlier event in its sequence was refused: HTTP 403 (not a member)"
+    );
+    assert_eq!(rx.got().len(), 1);
+}
+
+#[test]
+fn only_the_newest_ended_outcomes_are_kept() {
+    let rx = Receiver::start([]);
+    let hooks = Hooks::new(config(None).max_pending(2).target(Target::new(&rx.url, "k"))).unwrap();
+    let ids: Vec<EventId> = (0..3)
+        .map(|n| {
+            let id = hooks.emit("app.started", serde_json::json!({ "n": n })).unwrap();
+            assert!(hooks.wait_idle(Duration::from_secs(10)));
+            ended(&hooks, &id);
+            id
+        })
+        .collect();
+    assert_eq!(hooks.deliveries(&ids[0]), None, "the oldest forgotten");
+    assert!(hooks.deliveries(&ids[1]).is_some() && hooks.deliveries(&ids[2]).is_some());
 }
