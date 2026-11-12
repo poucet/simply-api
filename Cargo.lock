@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "relay-compat"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -860,7 +860,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "simply-api"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "simply-api-macros"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "simply-history"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "simply-hooks"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "http",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "simply-op-macros"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "simply-relay"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "futures",
  "rmcp 3.1.4",

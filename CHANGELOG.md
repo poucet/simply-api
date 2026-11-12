@@ -3,7 +3,12 @@
 What got added, per landing — dated with a clock and the jj change id
 (one entry per landing, newest first).
 
-## Unreleased
+## 0.2.0 — 2026-11-12
+
+#### The repo lives at `simply-audio/simply-api`; each crate has a README · 2026-11-12 21:42 · ppyksuwr, wsnkwunl
+
+- The repository URL is https://github.com/simply-audio/simply-api; pin
+  `tag = "v0.2.0"` there. Each published crate ships a README of its own.
 
 #### `simply-hooks`: each event's own outcome · 2026-11-10 12:13 · uxnlvkmo
 
