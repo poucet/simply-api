@@ -35,10 +35,10 @@ Depend on a tag, declared once at the consumer's workspace root:
 
 ```toml
 [workspace.dependencies]
-simply-api = { git = "https://github.com/poucet/simply-api", tag = "v0.1.0" }
+simply-api = { git = "https://github.com/simply-audio/simply-api", tag = "v0.1.0" }
 # or, for an undo tree with no API:
-simply-history = { git = "https://github.com/poucet/simply-api", tag = "v0.1.0" }
-simply-op-macros = { git = "https://github.com/poucet/simply-api", tag = "v0.1.0" }
+simply-history = { git = "https://github.com/simply-audio/simply-api", tag = "v0.1.0" }
+simply-op-macros = { git = "https://github.com/simply-audio/simply-api", tag = "v0.1.0" }
 ```
 
 `Cargo.lock` pins the commit. A newer tag means bumping `tag` and running

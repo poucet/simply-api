@@ -22,7 +22,7 @@
 //! [features]
 //! lumina = ["dep:simply-relay"]
 //! [dependencies]
-//! simply-relay = { git = "https://github.com/poucet/simply-api", tag = "v0.2.0", optional = true }
+//! simply-relay = { git = "https://github.com/simply-audio/simply-api", tag = "v0.2.0", optional = true }
 //! ```
 //!
 //! ```rust,ignore
