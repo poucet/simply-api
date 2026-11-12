@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
 
 # Deliberately independent of `simply-api`: it serves any rmcp 3.x
 # `ServerHandler`, so an app can adopt it before it uses simply-api.
